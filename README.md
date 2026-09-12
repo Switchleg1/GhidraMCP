@@ -1,10 +1,9 @@
-# ghidra_mcp — sectioned GhidraMCP bridge
+# GhidraMCP — sectioned bridge
 
-Drop-in replacement for the `bridge_mcp_ghidra.py` that ships with GhidraMCP
-(`C:\Program Files\ghidra_12.0.4_PUBLIC\mcp\`). Same launch command, same Ghidra plugin,
-same endpoints — different presentation and a leaner wire format. The pristine original
-is kept in `stock/` for reference (2496 lines, one file); this is 1284 lines across an
-entry point and a `library/` package with one class per file.
+Drop-in replacement for the `bridge_mcp_ghidra.py` that ships with GhidraMCP (the `mcp/`
+folder of your Ghidra install). Same launch command, same Ghidra plugin, same endpoints —
+different presentation and a leaner wire format. The stock bridge is one 2500-line file;
+this is ~1300 lines across an entry point and a `library/` package with one class per file.
 
 ```
 bridge_mcp_ghidra.py       entry: argv -> Config -> Bridge.run()
@@ -66,7 +65,7 @@ every write. Plus `ghidra_help(tool)`, `ghidra_tools(query)`, `list_instances`,
   `functions=[{address, name?, prototype?, variables?{old:new}, plate?, comment?}]`,
   `labels=[{address, name}]`, `globals=[{address, name?, type?, comment?}]`, `save=True`.
   Per-item writes are the `STEPS` / `GLOBAL_STEPS` tables in `annotator.py`. (Globals use
-  ``create_label` + `apply_data_type` + plate comment rather than `set_global` or `rename_or_label`, whose
+  `create_label` + `apply_data_type` + plate comment rather than `set_global` or `rename_or_label`, whose
   `g_`-Hungarian name policy rejects every ECU-style name.) Measured on an 8-function +
   7-label pass: 18 calls / 8.9 KB on the wire → 1 call / 4.3 KB, reply 1795 → 53 chars, 17
   fewer model round-trips.
@@ -82,9 +81,9 @@ hard cap (`--max-chars`, default 40 000) with a truncation note instead of an ov
 **Transport**: one keep-alive HTTP connection (reopened on failure) instead of a new TCP
 connection per call; GETs retry on transport error / 5xx and re-discover Ghidra after a
 restart; POSTs are never re-sent once the server may have seen them. UDS and WinDbg proxies
-are gone (neither works on this Windows box: no `AF_UNIX`, no dbgeng server).
+are gone (on Windows neither works: no `AF_UNIX`, and the dbgeng server is rarely run).
 
-### Measured (live I40 program, this machine)
+### Measured (live TriCore firmware, ~20k functions)
 
 | | stock | this |
 |---|---|---|
@@ -98,15 +97,18 @@ are gone (neither works on this Windows box: no `AF_UNIX`, no dbgeng server).
 
 ## Install
 
-Copy the entry point **and** the `library/` folder over the stock file (elevated shell —
-it's under Program Files):
+Requires Python 3.10+ and `pip install -r requirements.txt` (the `mcp` package).
 
-```bash
-Copy-Item "C:\Users\switchleg\Documents\GitHub\ghidra_mcp\bridge_mcp_ghidra.py" "C:\Program Files\ghidra_12.0.4_PUBLIC\mcp\" -Force; Copy-Item "C:\Users\switchleg\Documents\GitHub\ghidra_mcp\library" "C:\Program Files\ghidra_12.0.4_PUBLIC\mcp\library" -Recurse -Force
+Either point your MCP client at this repo's entry point:
+
+```json
+"ghidra": { "command": "python", "args": ["<path to this repo>/bridge_mcp_ghidra.py"] }
 ```
 
-No config change; restart the Claude app. A future GhidraMCP update will overwrite
-`bridge_mcp_ghidra.py` — recopy both.
+or copy `bridge_mcp_ghidra.py` **and** the `library/` folder over the stock file in your
+Ghidra install's `mcp/` directory (elevated shell if Ghidra lives under Program Files).
+Either way, restart the MCP client. If you install over the stock file, a future GhidraMCP
+update will overwrite it — recopy both.
 
 ### Flags
 
@@ -136,16 +138,16 @@ Env: `GHIDRA_MCP_URL`, `GHIDRA_MCP_LOG_LEVEL`, `GHIDRA_MCP_REQUIRE_PROGRAM_SELEC
 | project-name matching order | `_MATCHERS` in `discovery.py` |
 
 Endpoints upstream adds later that aren't in `SECTIONS` land in a section named after their
-upstream category, so nothing is hidden; `test_bridge.py` reports them.
+upstream category, so nothing is hidden; `test/test_bridge.py` reports them.
 
 ## Testing
 
 With Ghidra running, drives the bridge over stdio exactly as the app launches it:
 
 ```bash
-python test_bridge.py
+python test/test_bridge.py
 ```
 
 Advertised tools + payload size, then section calls, wrong-section / unknown-action /
 missing-arg / bad-arg errors, a `dry_run` write, `ghidra_help`, `ghidra_tools`, and any
-fallback sections. Flags pass through: `python test_bridge.py --brief`.
+fallback sections. Flags pass through: `python test/test_bridge.py --brief`.

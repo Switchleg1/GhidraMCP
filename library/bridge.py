@@ -88,8 +88,13 @@ class Bridge:
             names = ", ".join(i.get("project") or i["url"] for i in instances)
             log.info(f"{len(instances)} Ghidra instances ({names}); call connect_instance() to choose")
             return
-        url = instances[0]["url"] if instances else self.cfg.url
-        project = instances[0].get("project") if instances else None
+        if instances:
+            url, project = instances[0]["url"], instances[0].get("project")
+        elif not self.scanner.covers(self.cfg.url):
+            url, project = self.cfg.url, None          # explicit URL outside the scanned range
+        else:
+            log.info("no Ghidra instance found; tools register on connect_instance()")
+            return
         try:
             n = self.connect(url, project)
             log.info(f"connected to {project or url}: {n} endpoints")

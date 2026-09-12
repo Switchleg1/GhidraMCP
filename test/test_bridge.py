@@ -2,7 +2,7 @@
 Reports advertised tools + payload size, then exercises section calls, error
 paths, a dry-run write, ghidra_help and ghidra_tools. Ghidra must be running.
 
-    python test_bridge.py [bridge args, e.g. --brief --flat --expose x,y]
+    python test/test_bridge.py [bridge args, e.g. --brief --flat --expose x,y]
 """
 import io
 import json
@@ -13,7 +13,7 @@ from pathlib import Path
 
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 
-BRIDGE = Path(__file__).with_name("bridge_mcp_ghidra.py")
+BRIDGE = Path(__file__).resolve().parent.parent / "bridge_mcp_ghidra.py"
 p = subprocess.Popen([sys.executable, str(BRIDGE), *sys.argv[1:]],
                      stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                      stderr=subprocess.PIPE, text=True, encoding="utf-8")

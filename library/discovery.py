@@ -11,6 +11,7 @@ import json
 import socket
 from concurrent.futures import ThreadPoolExecutor
 from typing import Callable
+from urllib.parse import urlparse
 
 from .config import DEFAULT_PORT, PORT_SCAN_SPAN
 
@@ -26,6 +27,11 @@ class InstanceScanner:
     def __init__(self, host: str = "127.0.0.1", base_port: int = DEFAULT_PORT,
                  span: int = PORT_SCAN_SPAN, probe_timeout: float = 0.4):
         self.host, self.base_port, self.span, self.probe_timeout = host, base_port, span, probe_timeout
+
+    def covers(self, url: str) -> bool:
+        """True if `url` is a loopback port inside the scanned range."""
+        u = urlparse(url)
+        return (u.hostname or "").lower() in {"127.0.0.1", "localhost", "::1"} and             self.base_port <= (u.port or 0) < self.base_port + self.span
 
     def _port_open(self, port: int) -> bool:
         try:
