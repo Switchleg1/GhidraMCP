@@ -1,119 +1,151 @@
-[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
-[![GitHub release (latest by date)](https://img.shields.io/github/v/release/LaurieWired/GhidraMCP)](https://github.com/LaurieWired/GhidraMCP/releases)
-[![GitHub stars](https://img.shields.io/github/stars/LaurieWired/GhidraMCP)](https://github.com/LaurieWired/GhidraMCP/stargazers)
-[![GitHub forks](https://img.shields.io/github/forks/LaurieWired/GhidraMCP)](https://github.com/LaurieWired/GhidraMCP/network/members)
-[![GitHub contributors](https://img.shields.io/github/contributors/LaurieWired/GhidraMCP)](https://github.com/LaurieWired/GhidraMCP/graphs/contributors)
-[![Follow @lauriewired](https://img.shields.io/twitter/follow/lauriewired?style=social)](https://twitter.com/lauriewired)
+# ghidra_mcp — sectioned GhidraMCP bridge
 
-![ghidra_MCP_logo](https://github.com/user-attachments/assets/4986d702-be3f-4697-acce-aea55cd79ad3)
-
-
-# ghidraMCP
-ghidraMCP is an Model Context Protocol server for allowing LLMs to autonomously reverse engineer applications. It exposes numerous tools from core Ghidra functionality to MCP clients.
-
-https://github.com/user-attachments/assets/36080514-f227-44bd-af84-78e29ee1d7f9
-
-
-# Features
-MCP Server + Ghidra Plugin
-
-- Decompile and analyze binaries in Ghidra
-- Automatically rename methods and data
-- List methods, classes, imports, and exports
-
-# Installation
-
-## Prerequisites
-- Install [Ghidra](https://ghidra-sre.org)
-- Python3
-- MCP [SDK](https://github.com/modelcontextprotocol/python-sdk)
-
-## Ghidra
-First, download the latest [release](https://github.com/LaurieWired/GhidraMCP/releases) from this repository. This contains the Ghidra plugin and Python MCP client. Then, you can directly import the plugin into Ghidra.
-
-1. Run Ghidra
-2. Select `File` -> `Install Extensions`
-3. Click the `+` button
-4. Select the `GhidraMCP-1-2.zip` (or your chosen version) from the downloaded release
-5. Restart Ghidra
-6. Make sure the GhidraMCPPlugin is enabled in `File` -> `Configure` -> `Developer`
-7. *Optional*: Configure the port in Ghidra with `Edit` -> `Tool Options` -> `GhidraMCP HTTP Server`
-
-Video Installation Guide:
-
-
-https://github.com/user-attachments/assets/75f0c176-6da1-48dc-ad96-c182eb4648c3
-
-
-
-## MCP Clients
-
-Theoretically, any MCP client should work with ghidraMCP.  Three examples are given below.
-
-## Example 1: Claude Desktop
-To set up Claude Desktop as a Ghidra MCP client, go to `Claude` -> `Settings` -> `Developer` -> `Edit Config` -> `claude_desktop_config.json` and add the following:
-
-```json
-{
-  "mcpServers": {
-    "ghidra": {
-      "command": "python",
-      "args": [
-        "/ABSOLUTE_PATH_TO/bridge_mcp_ghidra.py",
-        "--ghidra-server",
-        "http://127.0.0.1:8080/"
-      ]
-    }
-  }
-}
-```
-
-Alternatively, edit this file directly:
-```
-/Users/YOUR_USER/Library/Application Support/Claude/claude_desktop_config.json
-```
-
-The server IP and port are configurable and should be set to point to the target Ghidra instance. If not set, both will default to localhost:8080.
-
-## Example 2: Cline
-To use GhidraMCP with [Cline](https://cline.bot), this requires manually running the MCP server as well. First run the following command:
+Drop-in replacement for the `bridge_mcp_ghidra.py` that ships with GhidraMCP
+(`C:\Program Files\ghidra_12.0.4_PUBLIC\mcp\`). Same launch command, same Ghidra plugin,
+same endpoints — different presentation and a leaner wire format. The pristine original
+is kept in `stock/` for reference (2496 lines, one file); this is 1284 lines across an
+entry point and a `library/` package with one class per file.
 
 ```
-python bridge_mcp_ghidra.py --transport sse --mcp-host 127.0.0.1 --mcp-port 8081 --ghidra-server http://127.0.0.1:8080/
+bridge_mcp_ghidra.py       entry: argv -> Config -> Bridge.run()
+library/
+  config.py      Config             flags + env resolved once
+  tooldef.py     ToolDef, ParamDef  one parsed endpoint
+  catalog.py     ToolCatalog        /mcp/schema -> ToolDefs, name sanitising, search
+  sections.py    SectionMap         the SECTIONS table + assignment
+  address.py     AddressNormalizer  ordered (regex -> transform) rules
+  client.py      GhidraClient       keep-alive HTTP, lock, timeout + retry tables
+  discovery.py   InstanceScanner    parallel loopback port scan, matcher table
+  shaper.py      ResponseShaper     (stage pipeline) lint strip, normalise, cap
+  dispatcher.py  ActionDispatcher   coercer table -> GET/POST -> shape
+  annotator.py   BatchAnnotator     rename/prototype/variables/comments/labels/globals in one call
+  explorer.py    Explorer           callers + call tree + subtree decompiles in one call
+  registry.py    ToolRegistry       section tools / first-class tools on FastMCP
+  bridge.py      Bridge             orchestration + the 7 static tools
 ```
 
-The only *required* argument is the transport. If all other arguments are unspecified, they will default to the above. Once the MCP server is running, open up Cline and select `MCP Servers` at the top.
+## Why
 
-![Cline select](https://github.com/user-attachments/assets/88e1f336-4729-46ee-9b81-53271e9c0ce0)
+**Per-session cost.** The stock bridge registers every endpoint (196) as its own MCP tool,
+plus 22 WinDbg proxies on Windows that collide with Ghidra's own `/debugger/*` and produce
+`*_2` duplicates: 222 tools, ~141 KB of schema, **~35k tokens on every turn**.
 
-Then select `Remote Servers` and add the following, ensuring that the url matches the MCP host and port:
+**Per-call cost.** Every write returned ~500 chars of naming-lint chatter ("is not
+PascalCase… Expected: …", "Plate comment missing Algorithm section"); decompiles came back
+with `\r\n`; `batch_decompile` returned code JSON-escaped inside JSON; and a large answer
+(e.g. `get_bulk_xrefs` on a hot helper) could exceed the client's tool-result limit and get
+dumped to a file.
 
-1. Server Name: GhidraMCP
-2. Server URL: `http://127.0.0.1:8081/sse`
+## What this version does
 
-## Example 3: 5ire
-Another MCP client that supports multiple models on the backend is [5ire](https://github.com/nanbingxyz/5ire). To set up GhidraMCP, open 5ire and go to `Tools` -> `New` and set the following configurations:
+**13 section tools** instead of 200 flat ones:
 
-1. Tool Key: ghidra
-2. Name: GhidraMCP
-3. Command: `python /ABSOLUTE_PATH_TO/bridge_mcp_ghidra.py`
+| tool | actions | covers |
+|---|---|---|
+| `ghidra_program` | 27 | open/switch/save programs, metadata, memory map, address spaces, analysis, scripts, project files |
+| `ghidra_functions` | 25 | list/search, decompile, disassemble, p-code, create/delete, rename, prototypes |
+| `ghidra_variables` | 8 | locals/params: list, rename, retype, storage, dataflow |
+| `ghidra_xrefs` | 12 | xrefs to/from, callers/callees, call graph, control flow, instruction search |
+| `ghidra_memory` | 22 | read/inspect bytes, byte-pattern search, strings, data items, globals, apply types, bookmarks |
+| `ghidra_symbols` | 16 | labels, namespaces, imports/exports, externals |
+| `ghidra_comments` | 6 | decompiler / disassembly / plate comments |
+| `ghidra_types` | 20 | Data Type Manager: browse, create struct/union/enum/typedef/ptr/array, import headers |
+| `ghidra_structs` | 7 | fields of an existing struct, usage analysis, naming hints |
+| `ghidra_tags` | 10 | function tags |
+| `ghidra_docs` | 18 | documentation completeness, hashes/similarity, diff & merge between programs |
+| `ghidra_dynamic` | 20 | Ghidra debugger (TraceRmi) + p-code emulation |
+| `ghidra_malware` | 5 | crypto constants, anti-analysis, IOCs |
 
-# Building from Source
-1. Copy the following files from your Ghidra directory to this project's `lib/` directory:
-- `Ghidra/Features/Base/lib/Base.jar`
-- `Ghidra/Features/Decompiler/lib/Decompiler.jar`
-- `Ghidra/Framework/Docking/lib/Docking.jar`
-- `Ghidra/Framework/Generic/lib/Generic.jar`
-- `Ghidra/Framework/Project/lib/Project.jar`
-- `Ghidra/Framework/SoftwareModeling/lib/SoftwareModeling.jar`
-- `Ghidra/Framework/Utility/lib/Utility.jar`
-- `Ghidra/Framework/Gui/lib/Gui.jar`
-2. Build with Maven by running:
+Each takes `action` (endpoint name, unchanged) and `args` (dict). The description lists every
+action with params and a one-liner, so the whole catalog is visible up front, grouped. Bad
+calls return the fix (valid params / right section / action list). `dry_run: true` works on
+every write. Plus `ghidra_help(tool)`, `ghidra_tools(query)`, `list_instances`,
+`connect_instance`, `import_file`, and two bridge-side batches (the server has neither):
 
-`mvn clean package assembly:single`
+- **`ghidra_annotate`** — a whole labelling pass in one call:
+  `functions=[{address, name?, prototype?, variables?{old:new}, plate?, comment?}]`,
+  `labels=[{address, name}]`, `globals=[{address, name?, type?, comment?}]`, `save=True`.
+  Per-item writes are the `STEPS` / `GLOBAL_STEPS` tables in `annotator.py`. (Globals use
+  ``create_label` + `apply_data_type` + plate comment rather than `set_global` or `rename_or_label`, whose
+  `g_`-Hungarian name policy rejects every ECU-style name.) Measured on an 8-function +
+  7-label pass: 18 calls / 8.9 KB on the wire → 1 call / 4.3 KB, reply 1795 → 53 chars, 17
+  fewer model round-trips.
+- **`ghidra_explore(address, depth=2, max_functions=12)`** — callers, callee tree to `depth`,
+  and decompiled code for the root + callees (BFS, bounded) in one reply. Same bytes as
+  `get_function_call_graph` + `batch_decompile` + `get_function_callers`, one round-trip.
 
-The generated zip file includes the built Ghidra plugin and its resources. These files are required for Ghidra to recognize the new extension.
+**Response shaping** (`ResponseShaper`, every call): server lint warnings dropped
+(`--keep-lint` restores), `{"success":true,"data":X}` unwrapped, `{addr: code}` maps emitted as
+plain text blocks, `\r\n` → `\n`, trailing spaces and blank runs collapsed, compact JSON, and a
+hard cap (`--max-chars`, default 40 000) with a truncation note instead of an oversized reply.
 
-- lib/GhidraMCP.jar
-- extensions.properties
-- Module.manifest
+**Transport**: one keep-alive HTTP connection (reopened on failure) instead of a new TCP
+connection per call; GETs retry on transport error / 5xx and re-discover Ghidra after a
+restart; POSTs are never re-sent once the server may have seen them. UDS and WinDbg proxies
+are gone (neither works on this Windows box: no `AF_UNIX`, no dbgeng server).
+
+### Measured (live I40 program, this machine)
+
+| | stock | this |
+|---|---|---|
+| tools advertised | 222 | 18 |
+| `tools/list` payload | ~141 KB (~35k tok) | ~31 KB (~7.7k tok); `--brief` ~18 KB |
+| `rename_function_by_address` reply | 670 chars | 146 |
+| `batch_decompile` (2 fns) | 1536 chars, escaped | 1416, plain text |
+| `decompile_function` | 2824 | 2737 |
+| cached read latency (keep-alive) | new conn/call | ~2 ms |
+| oversized reply | client dumps to file | capped at 40 000 chars + note |
+
+## Install
+
+Copy the entry point **and** the `library/` folder over the stock file (elevated shell —
+it's under Program Files):
+
+```bash
+Copy-Item "C:\Users\switchleg\Documents\GitHub\ghidra_mcp\bridge_mcp_ghidra.py" "C:\Program Files\ghidra_12.0.4_PUBLIC\mcp\" -Force; Copy-Item "C:\Users\switchleg\Documents\GitHub\ghidra_mcp\library" "C:\Program Files\ghidra_12.0.4_PUBLIC\mcp\library" -Recurse -Force
+```
+
+No config change; restart the Claude app. A future GhidraMCP update will overwrite
+`bridge_mcp_ghidra.py` — recopy both.
+
+### Flags
+
+| flag | effect |
+|---|---|
+| `--brief` | section descriptions list action names only |
+| `--expose a,b,c` | ALSO register these endpoints as ordinary first-class tools |
+| `--flat` | stock layout, one tool per endpoint (still shaped, no WinDbg) |
+| `--sections PATH` | JSON override of the `SECTIONS` table (same shape as the dict in `sections.py`) |
+| `--max-chars N` | response cap (default 40000) |
+| `--keep-lint` | keep the server's naming-lint warnings |
+| `--url`, `--transport`, `--mcp-host`, `--mcp-port` | as stock |
+
+Env: `GHIDRA_MCP_URL`, `GHIDRA_MCP_LOG_LEVEL`, `GHIDRA_MCP_REQUIRE_PROGRAM_SELECTORS=1`.
+
+### Editing behaviour — it's all tables
+
+| want to change | edit |
+|---|---|
+| which actions sit in which section, order, descriptions | `SECTIONS` in `sections.py` |
+| repeated param blurbs | `PARAM_DESCRIPTIONS` in `tooldef.py` |
+| what counts as lint noise | `LINT_MARKERS` in `shaper.py` |
+| per-endpoint timeouts / scaling | `TIMEOUTS`, `TIMEOUT_SCALING` in `client.py` |
+| retry behaviour per HTTP method | `RETRY` in `client.py` |
+| how arg values are coerced by declared type | `COERCERS` in `dispatcher.py` |
+| address string forms | `_RULES` in `address.py` |
+| project-name matching order | `_MATCHERS` in `discovery.py` |
+
+Endpoints upstream adds later that aren't in `SECTIONS` land in a section named after their
+upstream category, so nothing is hidden; `test_bridge.py` reports them.
+
+## Testing
+
+With Ghidra running, drives the bridge over stdio exactly as the app launches it:
+
+```bash
+python test_bridge.py
+```
+
+Advertised tools + payload size, then section calls, wrong-section / unknown-action /
+missing-arg / bad-arg errors, a `dry_run` write, `ghidra_help`, `ghidra_tools`, and any
+fallback sections. Flags pass through: `python test_bridge.py --brief`.
