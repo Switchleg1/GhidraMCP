@@ -75,12 +75,16 @@ every write. Plus `ghidra_help(tool)`, `ghidra_tools(query)`, `list_instances`,
 
 **Response shaping** (`ResponseShaper`, every call): server lint warnings dropped
 (`--keep-lint` restores), `{"success":true,"data":X}` unwrapped, `{addr: code}` maps emitted as
-plain text blocks, `\r\n` → `\n`, trailing spaces and blank runs collapsed, compact JSON, and a
+plain text blocks, a single list of flat records (`disassemble_bytes` instructions,
+`list_functions_enhanced`, …) rendered as a header + rows table (57 % smaller than the JSON for
+a 141-instruction disassembly; derivable columns such as instruction `length` dropped via
+`_DROP_COLUMNS`), `\r\n` → `\n`, trailing spaces and blank runs collapsed, compact JSON, and a
 hard cap (`--max-chars`, default 40 000) with a truncation note instead of an oversized reply.
 
 **Transport**: one keep-alive HTTP connection (reopened on failure) instead of a new TCP
-connection per call; GETs retry on transport error / 5xx and re-discover Ghidra after a
-restart; POSTs are never re-sent once the server may have seen them. UDS and WinDbg proxies
+connection per call (reopened proactively after 20 s idle, so a server-side keep-alive timeout
+cannot race the next write); GETs retry on transport error / 5xx and re-discover Ghidra after a
+restart; POSTs are re-sent only if the send itself failed (server never saw them). UDS and WinDbg proxies
 are gone (on Windows neither works: no `AF_UNIX`, and the dbgeng server is rarely run).
 
 ### Measured (live TriCore firmware, ~20k functions)
@@ -91,6 +95,7 @@ are gone (on Windows neither works: no `AF_UNIX`, and the dbgeng server is rarel
 | `tools/list` payload | ~141 KB (~35k tok) | ~31 KB (~7.7k tok); `--brief` ~18 KB |
 | `rename_function_by_address` reply | 670 chars | 146 |
 | `batch_decompile` (2 fns) | 1536 chars, escaped | 1416, plain text |
+| `disassemble_bytes` (141 instr) | 13 574 chars JSON | 5 766, table |
 | `decompile_function` | 2824 | 2737 |
 | cached read latency (keep-alive) | new conn/call | ~2 ms |
 | oversized reply | client dumps to file | capped at 40 000 chars + note |
@@ -131,6 +136,7 @@ Env: `GHIDRA_MCP_URL`, `GHIDRA_MCP_LOG_LEVEL`, `GHIDRA_MCP_REQUIRE_PROGRAM_SELEC
 | which actions sit in which section, order, descriptions | `SECTIONS` in `sections.py` |
 | repeated param blurbs | `PARAM_DESCRIPTIONS` in `tooldef.py` |
 | what counts as lint noise | `LINT_MARKERS` in `shaper.py` |
+| record-table columns to drop / meta keys to hide | `_DROP_COLUMNS`, `_DROP_META` in `shaper.py` |
 | per-endpoint timeouts / scaling | `TIMEOUTS`, `TIMEOUT_SCALING` in `client.py` |
 | retry behaviour per HTTP method | `RETRY` in `client.py` |
 | how arg values are coerced by declared type | `COERCERS` in `dispatcher.py` |

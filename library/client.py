@@ -37,6 +37,7 @@ TIMEOUT_SCALING: dict[str, tuple[tuple[str, ...], int]] = {
     "batch_set_comments":     (("decompiler_comments", "disassembly_comments", "plate_comment"), 8),
 }
 MAX_TIMEOUT = 600
+KEEPALIVE_IDLE_MAX = 20   # seconds; a socket idle longer is reopened before use rather than trusted
 
 
 @dataclass(frozen=True)
@@ -79,11 +80,14 @@ class GhidraClient:
         self.base_url = base_url
         self.host, self.port = u.hostname, u.port or 80
         self._conn: http.client.HTTPConnection | None = None
+        self._last_used = 0.0
         self._lock = threading.Lock()
 
     # -- connection ----------------------------------------------------------
 
     def _connection(self, timeout: int) -> http.client.HTTPConnection:
+        if self._conn is not None and time.monotonic() - self._last_used > KEEPALIVE_IDLE_MAX:
+            self.close()              # idle keep-alive: the server may have dropped it; don't race it
         if self._conn is None:
             self._conn = http.client.HTTPConnection(self.host, self.port, timeout=timeout)
         else:
@@ -115,6 +119,7 @@ class GhidraClient:
                 raise SendFailed(str(e)) from e
             resp = conn.getresponse()
             text = resp.read().decode("utf-8")
+            self._last_used = time.monotonic()
             if resp.getheader("Connection", "").lower() == "close":
                 self.close()
             return text, resp.status
@@ -139,6 +144,7 @@ class GhidraClient:
                 except SendFailed as e:
                     last = e
                     if attempt == 0:          # never reached the server: one clean resend, any method
+                        log.warning(f"{method} {endpoint}: send failed on stale connection ({e}); resending")
                         continue
                     raise
                 except (ConnectionError, OSError, http.client.HTTPException) as e:
