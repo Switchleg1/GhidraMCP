@@ -6,6 +6,8 @@
     ghidra_tools(query, section) keyword search / section summary
     ghidra_annotate(...)        whole labelling pass in one call
     ghidra_explore(address)     callers + call tree + subtree decompiles in one call
+    ghidra_where(address)       mapped? block? containing function?
+    ghidra_find(pattern,...)    regex / unnamed / region search over the function index
     import_file(...)            import a binary and optionally follow analysis
 """
 
@@ -27,12 +29,13 @@ from .discovery import InstanceScanner
 from .dispatcher import ActionDispatcher
 from .explorer import Explorer
 from .registry import ToolRegistry
+from .resolver import AddressResolver
 from .sections import SectionMap
 from .shaper import ResponseShaper
 
 log = logging.getLogger("ghidra-mcp")
 
-STATIC_TOOLS = {"list_instances", "connect_instance", "ghidra_help", "ghidra_tools", "ghidra_annotate", "ghidra_explore", "import_file"}
+STATIC_TOOLS = {"list_instances", "connect_instance", "ghidra_help", "ghidra_tools", "ghidra_annotate", "ghidra_explore", "ghidra_where", "ghidra_find", "import_file"}
 
 
 def _dumps(obj: Any) -> str:
@@ -54,7 +57,10 @@ class Bridge:
                                            self.reconnect, cfg.require_program)
         self.registry = ToolRegistry(self.mcp, self.dispatcher, cfg.brief)
         self.annotator = BatchAnnotator(self.dispatcher)
-        self.explorer = Explorer(self.dispatcher)
+        self.resolver = AddressResolver(self.dispatcher.raw)
+        self.dispatcher.resolver = self.resolver
+        self.explorer = Explorer(self.dispatcher, self.resolver)
+        self.program_name: str | None = None
         self._register_static_tools()
 
     def _enable_list_changed(self) -> None:
@@ -80,7 +86,19 @@ class Bridge:
         self.project = project
         self.catalog.by_name = ToolCatalog.from_schema(json.loads(text), STATIC_TOOLS).by_name
         self.registry.register(self.catalog, self.sections, self.cfg.flat, self.cfg.expose)
+        self._refresh_program_state()
         return len(self.catalog)
+
+    def _refresh_program_state(self) -> None:
+        """Memory-block + function index for ghidra_where/find and error hints; program name for summaries."""
+        try:
+            self.resolver.refresh()
+            info = self.client.get_json("/get_current_program_info") if self.client else None
+            self.program_name = (info or {}).get("name")
+            log.info(f"indexed {len(self.resolver.entries)} functions, {len(self.resolver.blocks)} blocks "
+                     f"in {self.program_name or '?'}")
+        except Exception as e:
+            log.warning(f"program index refresh failed: {e}")
 
     def auto_connect(self) -> None:
         instances = self.scanner.scan()
@@ -195,16 +213,43 @@ class Bridge:
             globals:   [{address, name?, type?, comment?}]      data: label + data type + plate comment
             save: save the program afterwards. dry_run: validate only.
             """
-            return bridge.annotator.apply(functions, labels, globals, save, dry_run)
+            return bridge.annotator.apply(functions, labels, globals, save, dry_run, bridge.program_name)
 
         @self.mcp.tool()
-        def ghidra_explore(address: str, depth: int = 2, max_functions: int = 12, callers: bool = True) -> str:
+        def ghidra_explore(address: str, depth: int = 2, max_functions: int = 12,
+                           callers: bool = True, code: bool = True) -> str:
             """
             Understand a function and its subtree in one call: callers of it, the callee tree to
-            `depth`, and decompiled code for the root plus callees (BFS order, up to max_functions).
-            Replaces call_graph -> batch_decompile -> callers as separate calls.
+            `depth`, and (code=True) decompiled root + callees in BFS order up to max_functions.
+            `address` may be inside the function (resolved to its entry) and may list several
+            roots comma-separated; code=False gives a bulk call-graph only.
             """
-            return bridge.shaper.cap_stage(bridge.explorer.explore(address, depth, max_functions, callers))
+            return bridge.shaper.cap_stage(bridge.explorer.explore(address, depth, max_functions, callers, code))
+
+        @self.mcp.tool()
+        def ghidra_where(address: str) -> str:
+            """
+            What is at an address: mapped or not, which memory block, and which function's body
+            contains it (entry, end, offset). Cheap; answers "is 0xc0000000 in the image?" and
+            "which function owns 0x800eab00?" without probing reads.
+            """
+            if not bridge.resolver.blocks:
+                return _dumps({"error": "Not connected / no program indexed."})
+            return _dumps(bridge.resolver.describe(address))
+
+        @self.mcp.tool()
+        def ghidra_find(pattern: str = "", unnamed: bool = False, region: str = "", limit: int = 50) -> str:
+            """
+            Search the function index (bridge-side, instant): regex on name (case-insensitive;
+            empty = all), unnamed=True keeps only FUN_/SUB_/thunk_ defaults, region = memory block
+            name or "start-end" hex range, e.g. ghidra_find(unnamed=True, region="80000000-80ffffff").
+            """
+            if not bridge.resolver.entries:
+                return _dumps({"error": "Not connected / no program indexed."})
+            try:
+                return _dumps(bridge.resolver.find(pattern, unnamed, region, limit))
+            except Exception as e:
+                return _dumps({"error": str(e)})
 
         @self.mcp.tool()
         async def import_file(file_path: str, project_folder: str = "/", language: str | None = None,

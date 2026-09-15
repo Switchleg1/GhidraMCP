@@ -9,11 +9,15 @@ The server has no endpoint for "rename + document many functions", so this
 composes the per-item endpoints and returns one compact summary instead of
 one reply per write. Each step is a row in STEPS: (item key, endpoint,
 arg-builder), so adding another per-function write is one more row.
+
+Writes listed in VERIFY are read back after the call and counted only if the
+value actually took; a mismatch is retried once, then reported per item.
 """
 
 from __future__ import annotations
 
 import json
+import re
 from typing import Callable
 
 from .dispatcher import ActionDispatcher
@@ -54,10 +58,25 @@ def _failed(reply: str) -> str | None:
 
 _ALREADY = ("already exists", "already has")
 
+# field -> (read-back endpoint, args builder, extractor(reply) -> current value)
+_FN_NAME = re.compile(r"Function:\s*(\S+)\s+at\s")
+VERIFY: dict[str, tuple[str, Callable[[str], dict], Callable[[str], str | None]]] = {
+    "name": ("get_function_by_address", lambda addr: {"address": addr},
+             lambda reply: (m.group(1) if (m := _FN_NAME.search(reply)) else None)),
+}
+
 
 class BatchAnnotator:
     def __init__(self, dispatcher: ActionDispatcher):
         self.dispatcher = dispatcher
+
+    def _verified(self, field: str, addr: str, value) -> bool | None:
+        """True/False if the write can be read back, None if no verifier for this field."""
+        spec = VERIFY.get(field)
+        if spec is None:
+            return None
+        endpoint, build, extract = spec
+        return extract(self.dispatcher.call(endpoint, build(addr))) == value
 
     def _run(self, steps, item: dict, addr: str, prefix: str, extra: dict,
              counts: dict, errors: list) -> None:
@@ -65,8 +84,17 @@ class BatchAnnotator:
             value = item.get(field)
             if not value:
                 continue
-            err = _failed(self.dispatcher.call(endpoint, build(addr, value) | extra))
             key = f"{prefix}{field}"
+            err = None
+            for attempt in (1, 2):
+                err = _failed(self.dispatcher.call(endpoint, build(addr, value) | extra))
+                if err is None and not extra:               # not on dry_run
+                    ok = self._verified(field, addr, value)
+                    if ok is False:
+                        err = "write reported success but read-back differs"
+                        if attempt == 1:
+                            continue                        # one clean retry
+                break
             if err is None:
                 counts[key] = counts.get(key, 0) + 1
             elif any(a in err for a in _ALREADY):
@@ -75,7 +103,8 @@ class BatchAnnotator:
                 errors.append(f"{endpoint} {addr}: {err}")
 
     def apply(self, functions: list[dict] | None, labels: list[dict] | None,
-              globals_: list[dict] | None = None, save: bool = True, dry_run: bool = False) -> str:
+              globals_: list[dict] | None = None, save: bool = True, dry_run: bool = False,
+              program: str | None = None) -> str:
         counts: dict[str, int] = {}
         errors: list[str] = []
         extra = {"dry_run": True} if dry_run else {}
@@ -115,6 +144,8 @@ class BatchAnnotator:
                 errors.append(f"save_program: {err}")
 
         out: dict = {"applied": counts}
+        if program:
+            out["program"] = program
         if dry_run:
             out["dry_run"] = True
         if errors:

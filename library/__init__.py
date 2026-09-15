@@ -9,6 +9,7 @@
     InstanceScanner   find running Ghidra instances
     ResponseShaper    trim / normalise / cap responses
     ActionDispatcher  validate args, call endpoint, shape result
+    AddressResolver   block / containing-function / function-index queries
     BatchAnnotator    rename + comment + label many things in one call
     Explorer          callers + call tree + subtree decompiles in one call
     ToolRegistry      register section + first-class tools on FastMCP

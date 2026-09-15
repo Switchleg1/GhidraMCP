@@ -4,12 +4,19 @@
 
 Argument handling is table-driven: COERCERS by declared param type, and
 ROUTING by (method, param.source) deciding query-string vs JSON body.
+
+Bridge-side extras on every action:
+    _grep=<regex>      keep only response lines matching (case-insensitive)
+    post_hooks         per-action response post-processing (containing-function
+                       hints on "no function" errors, unmapped-target notes on
+                       halt_baddata decompiles, index refresh after create/delete)
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any, Callable
 
 from .address import AddressNormalizer
@@ -56,6 +63,13 @@ COERCERS: dict[str, Callable[[Any], Any]] = {
     "integer": _to_int, "number": _to_float, "boolean": _to_bool,
     "json": _to_json, "object": _to_json, "array": _to_json,
 }
+# declared type -> coercer for values arriving as lists (models often pass ["a","b"] for "a,b")
+LIST_COERCERS: dict[str, Callable[[list], Any]] = {
+    "string": lambda v: ",".join(str(x) for x in v),
+}
+
+_NO_FUNCTION = re.compile(r"(?:No function (?:found )?(?:at|for) (?:address:? )?|Function not found:? )(0x[0-9a-fA-F]+|[0-9a-fA-F]{6,})")
+_BADDATA = "halt_baddata()"
 
 
 def _error(**fields) -> str:
@@ -71,6 +85,14 @@ class ActionDispatcher:
         self.shaper = shaper
         self._reconnect = reconnect
         self.require_program = require_program
+        self.resolver = None                     # AddressResolver, attached by Bridge
+        # action -> post-processor(text, args) -> text
+        self.post_hooks: dict[str, Callable[[str, dict], str]] = {
+            "decompile_function": self._note_baddata,
+            "batch_decompile": self._note_baddata,
+            "create_function": self._refresh_index,
+            "delete_function": self._refresh_index,
+        }
 
     # -- validation ----------------------------------------------------------
 
@@ -105,6 +127,8 @@ class ActionDispatcher:
                 continue
             if p.is_address:
                 v = AddressNormalizer.normalize(v)
+            elif isinstance(v, list) and p.type in LIST_COERCERS:
+                v = LIST_COERCERS[p.type](v)
             elif isinstance(v, str) and p.type in COERCERS:
                 v = COERCERS[p.type](v)
             elif p.type == "boolean" and not isinstance(v, str):
@@ -120,11 +144,88 @@ class ActionDispatcher:
         if td is None:
             return _error(error=f"unknown tool '{name}'", did_you_mean=self.catalog.similar(name))
         args = dict(args or {})
+        grep = args.pop("_grep", None)
         err = self._validate(td, args)
         if err:
             return err
         query, body = self._prepare(td, args)
-        return self.shaper.shape(self._send(td, query, body))
+        text = self.shaper.shape(self._send(td, query, body))
+        text = self._hint_containing(text)
+        hook = self.post_hooks.get(name)
+        if hook:
+            text = hook(text, args)
+        if grep:
+            text = self._grep(text, grep)
+        return text
+
+    # -- post-processing -----------------------------------------------------
+
+    @staticmethod
+    def _grep(text: str, pattern: str) -> str:
+        try:
+            rx = re.compile(pattern, re.I)
+        except re.error as e:
+            return _error(error=f"bad _grep pattern: {e}")
+        lines = text.split("\n")
+        kept = [l for l in lines if rx.search(l)]
+        return "\n".join(kept) + f"\n[_grep {pattern!r}: {len(kept)}/{len(lines)} lines]"
+
+    def _hint_containing(self, text: str) -> str:
+        """'No function at 0x...' -> name the function whose body holds that address."""
+        if self.resolver is None or len(text) > 400:
+            return text
+        m = _NO_FUNCTION.search(text)
+        if not m:
+            return text
+        try:
+            fn = self.resolver.containing(int(m.group(1).replace("0x", ""), 16))
+        except Exception:
+            return text
+        if not fn:
+            return text
+        name, entry, end = fn
+        return text.rstrip() + f"\n[containing function: {name} @ 0x{entry:x} (body to 0x{end:x}) - use that entry]"
+
+    def _note_baddata(self, text: str, args: dict) -> str:
+        """Ghidra emits halt_baddata() when flow leaves the image (e.g. a far tail call into an
+        unmapped library region). Say so and name the targets so the code isn't misread."""
+        if _BADDATA not in text or self.resolver is None:
+            return text
+        notes = []
+        for addr in self._decompiled_addresses(text, args):
+            asm = self._send_plain("disassemble_function", {"address": addr})
+            for src, tgt in self.resolver.unmapped_targets(asm):
+                notes.append(f"{addr}: {src} -> {tgt} (outside every memory block)")
+        note = ("\n// NOTE halt_baddata(): control flow leaves mapped memory - a call/jump to an "
+                "address outside the image (external library / unmapped region), NOT bad code. "
+                "Treat it as an unresolved external call.")
+        if notes:
+            note += "\n//   " + "\n//   ".join(notes)
+        return text + note
+
+    @staticmethod
+    def _decompiled_addresses(text: str, args: dict) -> list[str]:
+        if "address" in args:
+            return [str(args["address"])]
+        return re.findall(r"^// ===== (\S+) =====$", text, re.M)
+
+    def raw(self, action: str, args: dict) -> str:
+        """Unshaped, uncapped call for bridge-internal use (indexes, hooks)."""
+        td = self.catalog.get(action)
+        if td is None:
+            return ""
+        query, body = self._prepare(td, args)
+        return self._send(td, query, body)
+
+    _send_plain = raw
+
+    def _refresh_index(self, text: str, args: dict) -> str:
+        if self.resolver is not None and '"success":true' in text.replace(" ", ""):
+            try:
+                self.resolver.refresh_functions()
+            except Exception as e:
+                log.warning(f"function index refresh failed: {e}")
+        return text
 
     def _send(self, td: ToolDef, query: dict, body: dict | None) -> str:
         for attempt in (0, 1):

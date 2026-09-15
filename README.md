@@ -19,8 +19,9 @@ library/
   dispatcher.py  ActionDispatcher   coercer table -> GET/POST -> shape
   annotator.py   BatchAnnotator     rename/prototype/variables/comments/labels/globals in one call
   explorer.py    Explorer           callers + call tree + subtree decompiles in one call
+  resolver.py    AddressResolver    memory-block + function index: where / find / unmapped targets
   registry.py    ToolRegistry       section tools / first-class tools on FastMCP
-  bridge.py      Bridge             orchestration + the 7 static tools
+  bridge.py      Bridge             orchestration + the 9 static tools
 ```
 
 ## Why
@@ -69,9 +70,29 @@ every write. Plus `ghidra_help(tool)`, `ghidra_tools(query)`, `list_instances`,
   `g_`-Hungarian name policy rejects every ECU-style name.) Measured on an 8-function +
   7-label pass: 18 calls / 8.9 KB on the wire → 1 call / 4.3 KB, reply 1795 → 53 chars, 17
   fewer model round-trips.
-- **`ghidra_explore(address, depth=2, max_functions=12)`** — callers, callee tree to `depth`,
-  and decompiled code for the root + callees (BFS, bounded) in one reply. Same bytes as
-  `get_function_call_graph` + `batch_decompile` + `get_function_callers`, one round-trip.
+- **`ghidra_explore(address, depth=2, max_functions=12, code=True)`** — callers, callee tree to
+  `depth`, and decompiled code for the root + callees (BFS, bounded) in one reply. A mid-function
+  address resolves to its entry; several comma-separated roots with `code=False` give a bulk
+  call graph.
+- **`ghidra_where(address)`** — mapped? which memory block? which function's body (entry, end,
+  offset)? Instant, from a bridge-side index built at connect.
+- **`ghidra_find(pattern, unnamed, region, limit)`** — regex / unnamed-only / region search over
+  the function index (the server's `search_functions` is substring-only and needs a term).
+
+Every write in `ghidra_annotate` that can be read back (function names) is verified after the
+call and counted only if it took — one silent retry on mismatch, then a per-item error. The
+summary names the program the writes hit.
+
+**Bridge-side extras on any action** (`ActionDispatcher`):
+
+- `_grep="<regex>"` in `args` keeps only matching response lines — `get_xrefs_to(..., _grep="WRITE")`
+  is a writers-only xref list; works on any text or table reply.
+- List values for string params are joined with commas (`batch_decompile(functions=[...])` works).
+- "No function at 0x…" errors carry `[containing function: NAME @ entry]`.
+- Decompiles containing `halt_baddata()` get a note naming each jump/call whose target lies outside
+  every memory block — Ghidra emits that pseudo-call for tail calls into an unmapped library
+  region, and read literally it produces wrong function names.
+- `create_function` / `delete_function` refresh the function index.
 
 **Response shaping** (`ResponseShaper`, every call): server lint warnings dropped
 (`--keep-lint` restores), `{"success":true,"data":X}` unwrapped, `{addr: code}` maps emitted as
@@ -127,6 +148,8 @@ update will overwrite it — recopy both.
 | `--keep-lint` | keep the server's naming-lint warnings |
 | `--url`, `--transport`, `--mcp-host`, `--mcp-port` | as stock |
 
+Startup indexes the program once (`list_segments` + `list_functions`, ~0.2 s for 20k functions).
+
 Env: `GHIDRA_MCP_URL`, `GHIDRA_MCP_LOG_LEVEL`, `GHIDRA_MCP_REQUIRE_PROGRAM_SELECTORS=1`.
 
 ### Editing behaviour — it's all tables
@@ -137,6 +160,9 @@ Env: `GHIDRA_MCP_URL`, `GHIDRA_MCP_LOG_LEVEL`, `GHIDRA_MCP_REQUIRE_PROGRAM_SELEC
 | repeated param blurbs | `PARAM_DESCRIPTIONS` in `tooldef.py` |
 | what counts as lint noise | `LINT_MARKERS` in `shaper.py` |
 | record-table columns to drop / meta keys to hide | `_DROP_COLUMNS`, `_DROP_META` in `shaper.py` |
+| which annotate fields are read back and verified | `VERIFY` in `annotator.py` |
+| per-action response post-hooks | `post_hooks` in `dispatcher.py` |
+| mnemonics treated as flow transfers for unmapped-target notes | `_FLOW` in `resolver.py` |
 | per-endpoint timeouts / scaling | `TIMEOUTS`, `TIMEOUT_SCALING` in `client.py` |
 | retry behaviour per HTTP method | `RETRY` in `client.py` |
 | how arg values are coerced by declared type | `COERCERS` in `dispatcher.py` |
