@@ -76,12 +76,18 @@ every write. Plus `ghidra_help(tool)`, `ghidra_tools(query)`, `list_instances`,
   call graph.
 - **`ghidra_where(address)`** — mapped? which memory block? which function's body (entry, end,
   offset)? Instant, from a bridge-side index built at connect.
-- **`ghidra_find(pattern, unnamed, region, limit)`** — regex / unnamed-only / region search over
-  the function index (the server's `search_functions` is substring-only and needs a term).
+- **`ghidra_find(pattern, unnamed, region, limit, max_callees, min_callers, sort)`** — regex /
+  unnamed-only / region search over the function index, plus structural filters from the call
+  graph (loaded once on first use, ~1.5 s): `max_callees=0` = leaf functions, `min_callers=N`,
+  `sort="callers"`. "Unnamed leaves in flash with ≥10 callers, most-called first" is one call.
+  The index is updated in place on every rename/create/delete and reports `index_as_of`.
 
 Every write in `ghidra_annotate` that can be read back (function names) is verified after the
 call and counted only if it took — one silent retry on mismatch, then a per-item error. The
-summary names the program the writes hit.
+summary names the program the writes hit. The server's `rename_function_by_address` enforces a
+*token-subset* name policy (`MulDivRound_S16Sat` blocks `MulDivRound_S16SatRemainder` as a
+`name_collision`); `rename_function` (by name) does not, so on that rejection the annotator
+falls back to the by-name path and counts it as `name_via_byname_path`.
 
 **Bridge-side extras on any action** (`ActionDispatcher`):
 
@@ -161,6 +167,7 @@ Env: `GHIDRA_MCP_URL`, `GHIDRA_MCP_LOG_LEVEL`, `GHIDRA_MCP_REQUIRE_PROGRAM_SELEC
 | what counts as lint noise | `LINT_MARKERS` in `shaper.py` |
 | record-table columns to drop / meta keys to hide | `_DROP_COLUMNS`, `_DROP_META` in `shaper.py` |
 | which annotate fields are read back and verified | `VERIFY` in `annotator.py` |
+| mnemonics counted as flow transfers / call-graph edge parsing | `_FLOW`, `_EDGE` in `resolver.py` |
 | per-action response post-hooks | `post_hooks` in `dispatcher.py` |
 | mnemonics treated as flow transfers for unmapped-target notes | `_FLOW` in `resolver.py` |
 | per-endpoint timeouts / scaling | `TIMEOUTS`, `TIMEOUT_SCALING` in `client.py` |

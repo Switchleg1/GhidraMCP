@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import bisect
 import re
+import time
 from typing import Callable
 
 _SEG_LINE = re.compile(r"^(?P<name>.+?):\s*(?P<start>[0-9a-fA-F]+)\s*-\s*(?P<end>[0-9a-fA-F]+)\s*$")
@@ -25,6 +26,7 @@ _FN_LINE = re.compile(r"^(?P<name>\S+)\s+(?:at|@)\s+(?P<addr>[0-9a-fA-F]+)\s*$")
 _FN_HEAD = re.compile(r"Function:\s*(\S+)\s+at\s+([0-9a-fA-F]+)")
 _BODY = re.compile(r"Body:\s*([0-9a-fA-F]+)\s*-\s*([0-9a-fA-F]+)")
 _UNNAMED = re.compile(r"^(FUN|SUB|thunk_FUN|LAB)_[0-9a-fA-F]+$")
+_EDGE = re.compile(r"^\s*(\S+)\s*->\s*(\S+)\s*$")
 # control-transfer mnemonics with an absolute target operand (TriCore + generic)
 _FLOW = re.compile(r"^\s*([0-9a-fA-F]+):\s*(?:j|ja|jl|jla|call|calla|jump|b|bl|jmp)\s+(?:0x)?([0-9a-fA-F]{6,})\s*$", re.M)
 
@@ -39,6 +41,9 @@ class AddressResolver:
         self.blocks: list[tuple[int, int, str]] = []
         self.entries: list[int] = []
         self.names: list[str] = []
+        self.indexed_at: float = 0.0
+        self._callees: dict[int, int] | None = None     # entry -> callee count (lazy)
+        self._callers: dict[int, int] | None = None     # entry -> caller count (lazy)
 
     # -- caches --------------------------------------------------------------
 
@@ -58,6 +63,39 @@ class AddressResolver:
                        for line in text.splitlines() if (m := _FN_LINE.match(line)))
         self.entries = [a for a, _ in pairs]
         self.names = [n for _, n in pairs]
+        self.indexed_at = time.time()
+        self._callees = self._callers = None
+
+    def rename(self, new: str, addr: int | None = None, old: str | None = None) -> None:
+        """Keep the index current after a rename (by address, or by old name)."""
+        if addr is not None:
+            i = bisect.bisect_left(self.entries, addr)
+            if i < len(self.entries) and self.entries[i] == addr:
+                self.names[i] = new
+        elif old is not None:
+            for i, n in enumerate(self.names):
+                if n == old:
+                    self.names[i] = new
+                    break
+
+    def _load_call_counts(self) -> None:
+        """One get_full_call_graph (edges) -> callee/caller counts keyed by entry address."""
+        by_name = {}
+        for a, n in zip(self.entries, self.names):
+            by_name.setdefault(n, a)
+        text = self._call("get_full_call_graph", {"format": "edges", "limit": 1_000_000})
+        callees: dict[int, int] = {}
+        callers: dict[int, int] = {}
+        for line in text.splitlines():
+            m = _EDGE.match(line)
+            if not m:
+                continue
+            a, b = by_name.get(m.group(1)), by_name.get(m.group(2))
+            if a is not None:
+                callees[a] = callees.get(a, 0) + 1
+            if b is not None:
+                callers[b] = callers.get(b, 0) + 1
+        self._callees, self._callers = callees, callers
 
     # -- queries -------------------------------------------------------------
 
@@ -101,8 +139,12 @@ class AddressResolver:
         return out
 
     def find(self, pattern: str = "", unnamed: bool = False, region: str = "",
-             limit: int = 50) -> dict:
+             limit: int = 50, max_callees: int | None = None, min_callers: int | None = None,
+             sort: str = "") -> dict:
         rx = re.compile(pattern, re.I) if pattern else None
+        need_counts = max_callees is not None or min_callers is not None or sort in ("callers", "callees")
+        if need_counts and self._callees is None:
+            self._load_call_counts()
         lo, hi = 0, 1 << 64
         if region:
             if "-" in region:
@@ -116,9 +158,23 @@ class AddressResolver:
                 else:
                     return {"error": f"unknown region '{region}'",
                             "blocks": [b[2] for b in self.blocks][:40]}
-        hits = [f"{n} @ {a:x}" for a, n in zip(self.entries, self.names)
+        rows = [(a, n) for a, n in zip(self.entries, self.names)
                 if lo <= a <= hi and (not unnamed or _UNNAMED.match(n)) and (rx is None or rx.search(n))]
-        return {"matches": len(hits), "shown": min(len(hits), limit), "functions": hits[:limit]}
+        if need_counts:
+            ce, cr = self._callees or {}, self._callers or {}
+            rows = [(a, n) for a, n in rows
+                    if (max_callees is None or ce.get(a, 0) <= max_callees)
+                    and (min_callers is None or cr.get(a, 0) >= min_callers)]
+            if sort == "callers":
+                rows.sort(key=lambda r: -cr.get(r[0], 0))
+            elif sort == "callees":
+                rows.sort(key=lambda r: -ce.get(r[0], 0))
+            hits = [f"{n} @ {a:x}  callers={cr.get(a, 0)} callees={ce.get(a, 0)}" for a, n in rows[:limit]]
+        else:
+            hits = [f"{n} @ {a:x}" for a, n in rows[:limit]]
+        return {"matches": len(rows), "shown": len(hits),
+                "index_as_of": time.strftime("%H:%M:%S", time.localtime(self.indexed_at)),
+                "functions": hits}
 
     def unmapped_targets(self, disassembly: str) -> list[tuple[str, str]]:
         """[(from_addr, target)] for jumps/calls whose target lies outside every block."""

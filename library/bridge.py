@@ -238,16 +238,20 @@ class Bridge:
             return _dumps(bridge.resolver.describe(address))
 
         @self.mcp.tool()
-        def ghidra_find(pattern: str = "", unnamed: bool = False, region: str = "", limit: int = 50) -> str:
+        def ghidra_find(pattern: str = "", unnamed: bool = False, region: str = "", limit: int = 50,
+                        max_callees: int | None = None, min_callers: int | None = None, sort: str = "") -> str:
             """
-            Search the function index (bridge-side, instant): regex on name (case-insensitive;
-            empty = all), unnamed=True keeps only FUN_/SUB_/thunk_ defaults, region = memory block
-            name or "start-end" hex range, e.g. ghidra_find(unnamed=True, region="80000000-80ffffff").
+            Search the function index (bridge-side, kept current on rename/create/delete): regex on
+            name (case-insensitive; empty = all), unnamed=True keeps only FUN_/SUB_/thunk_ defaults,
+            region = memory block name or "start-end" hex range. Structural filters use the call
+            graph (loaded once on first use): max_callees=0 -> leaf functions, min_callers=N,
+            sort="callers"|"callees". e.g. unnamed leaves in flash ranked by callers:
+            ghidra_find(unnamed=True, region="80000000-80ffffff", max_callees=0, sort="callers").
             """
             if not bridge.resolver.entries:
                 return _dumps({"error": "Not connected / no program indexed."})
             try:
-                return _dumps(bridge.resolver.find(pattern, unnamed, region, limit))
+                return _dumps(bridge.resolver.find(pattern, unnamed, region, limit, max_callees, min_callers, sort))
             except Exception as e:
                 return _dumps({"error": str(e)})
 

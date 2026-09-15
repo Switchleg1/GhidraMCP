@@ -50,13 +50,20 @@ def _failed(reply: str) -> str | None:
     if not isinstance(obj, dict):
         return None
     if obj.get("error"):
-        return str(obj["error"])[:200]
+        issue = obj.get("issue")
+        return (f"{obj['error']} ({issue})" if issue else str(obj["error"]))[:200]
     if obj.get("status") not in (None, "success") or obj.get("success") is False:
         return (obj.get("message") or reply)[:200]
     return None
 
 
 _ALREADY = ("already exists", "already has")
+
+# rename_function_by_address enforces a "token-subset" name policy (a new name sharing the
+# token set of an existing function, e.g. MulDivRound_S16Sat vs MulDivRound_S16SatRemainder,
+# is rejected as name_collision). rename_function (by name) does not. ECU code is full of
+# such families, so on that specific rejection fall back to the by-name path.
+_TOKEN_SUBSET = "token_subset"
 
 # field -> (read-back endpoint, args builder, extractor(reply) -> current value)
 _FN_NAME = re.compile(r"Function:\s*(\S+)\s+at\s")
@@ -69,6 +76,13 @@ VERIFY: dict[str, tuple[str, Callable[[str], dict], Callable[[str], str | None]]
 class BatchAnnotator:
     def __init__(self, dispatcher: ActionDispatcher):
         self.dispatcher = dispatcher
+
+    def _rename_by_name(self, addr: str, new_name: str, extra: dict) -> str | None:
+        endpoint, build, extract = VERIFY["name"]
+        current = extract(self.dispatcher.call(endpoint, build(addr)))
+        if not current:
+            return "token-subset rejection and current name unreadable"
+        return _failed(self.dispatcher.call("rename_function", {"oldName": current, "newName": new_name} | extra))
 
     def _verified(self, field: str, addr: str, value) -> bool | None:
         """True/False if the write can be read back, None if no verifier for this field."""
@@ -88,6 +102,10 @@ class BatchAnnotator:
             err = None
             for attempt in (1, 2):
                 err = _failed(self.dispatcher.call(endpoint, build(addr, value) | extra))
+                if err and field == "name" and _TOKEN_SUBSET in err:
+                    err = self._rename_by_name(addr, value, extra)
+                    if err is None:
+                        counts["name_via_byname_path"] = counts.get("name_via_byname_path", 0) + 1
                 if err is None and not extra:               # not on dry_run
                     ok = self._verified(field, addr, value)
                     if ok is False:

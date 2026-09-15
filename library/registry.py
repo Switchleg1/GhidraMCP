@@ -24,7 +24,8 @@ PY_TYPES = {"string": str, "json": str, "integer": int, "boolean": bool,
             "number": float, "object": dict, "array": list}
 
 SECTION_HEADER = ("Call with action=<name>, args={...}; ghidra_help(name) for full params; "
-                  "write actions accept dry_run=true.\nActions:")
+                  "write actions accept dry_run=true; any action accepts _grep=<regex> to keep only "
+                  "matching reply lines (e.g. get_xrefs_to with _grep='WRITE' = writers only).\nActions:")
 
 
 class ToolRegistry:

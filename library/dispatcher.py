@@ -92,6 +92,9 @@ class ActionDispatcher:
             "batch_decompile": self._note_baddata,
             "create_function": self._refresh_index,
             "delete_function": self._refresh_index,
+            "rename_function_by_address": self._track_rename,
+            "rename_function": self._track_rename,
+            "batch_rename_function_components": self._track_rename,
         }
 
     # -- validation ----------------------------------------------------------
@@ -218,6 +221,23 @@ class ActionDispatcher:
         return self._send(td, query, body)
 
     _send_plain = raw
+
+    def _track_rename(self, text: str, args: dict) -> str:
+        """Update the function index in place so ghidra_find never lags a rename."""
+        if self.resolver is None or '"error"' in text[:40] or '"rejected"' in text[:60]:
+            return text
+        new = args.get("new_name") or args.get("newName") or args.get("function_name")
+        if not new:
+            return text
+        addr = args.get("function_address")
+        try:
+            if addr:
+                self.resolver.rename(new, addr=int(str(addr).split(":")[-1].replace("0x", ""), 16))
+            elif args.get("oldName"):
+                self.resolver.rename(new, old=args["oldName"])
+        except ValueError:
+            pass
+        return text
 
     def _refresh_index(self, text: str, args: dict) -> str:
         if self.resolver is not None and '"success":true' in text.replace(" ", ""):
