@@ -150,7 +150,7 @@ update will overwrite it — recopy both.
 | `--expose a,b,c` | ALSO register these endpoints as ordinary first-class tools |
 | `--flat` | stock layout, one tool per endpoint (still shaped, no WinDbg) |
 | `--sections PATH` | JSON override of the `SECTIONS` table (same shape as the dict in `sections.py`) |
-| `--max-chars N` | response cap (default 40000) |
+| `--max-chars N` | response cap (default 40000). Set it **below your client's tool-result limit** — some harnesses silently replace oversized results with `{omitted:true}`, which reads as a false negative; the bridge's in-band `...[truncated]` note never does. |
 | `--keep-lint` | keep the server's naming-lint warnings |
 | `--url`, `--transport`, `--mcp-host`, `--mcp-port` | as stock |
 
@@ -166,6 +166,7 @@ Env: `GHIDRA_MCP_URL`, `GHIDRA_MCP_LOG_LEVEL`, `GHIDRA_MCP_REQUIRE_PROGRAM_SELEC
 | repeated param blurbs | `PARAM_DESCRIPTIONS` in `tooldef.py` |
 | what counts as lint noise | `LINT_MARKERS` in `shaper.py` |
 | record-table columns to drop / meta keys to hide | `_DROP_COLUMNS`, `_DROP_META` in `shaper.py` |
+| server-internal bulk fields to elide per action (e.g. `basic_block_hashes`) | `FIELD_DROPS` in `shaper.py` |
 | which annotate fields are read back and verified | `VERIFY` in `annotator.py` |
 | mnemonics counted as flow transfers / call-graph edge parsing | `_FLOW`, `_EDGE` in `resolver.py` |
 | per-action response post-hooks | `post_hooks` in `dispatcher.py` |

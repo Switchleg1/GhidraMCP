@@ -152,7 +152,7 @@ class ActionDispatcher:
         if err:
             return err
         query, body = self._prepare(td, args)
-        text = self.shaper.shape(self._send(td, query, body))
+        text = self.shaper.shape(self._send(td, query, body), name)
         text = self._hint_containing(text)
         hook = self.post_hooks.get(name)
         if hook:

@@ -30,6 +30,15 @@ _BLANK_RUN = re.compile(r"\n{3,}")
 _DROP_META = {"success", "message", "truncated"}
 _DROP_COLUMNS: dict[str, set[str]] = {"instructions": {"length"}}
 
+# Per-action fields that are server-internal bulk (hash lists etc.) and only
+# ever consumed by other server endpoints. Replaced by a short count note so a
+# reply cannot balloon past a client's tool-result limit.
+FIELD_DROPS: dict[str, set[str]] = {
+    "get_function_signature": {"basic_block_hashes"},
+    "get_function_hash": {"basic_block_hashes"},
+    "get_bulk_function_hashes": {"basic_block_hashes"},
+}
+
 
 def _is_lint(msg) -> bool:
     return isinstance(msg, str) and any(m in msg for m in LINT_MARKERS)
@@ -41,7 +50,8 @@ class ResponseShaper:
         self.keep_lint = keep_lint
         self.stages: list[Callable[[str], str]] = [self.json_stage, self.text_stage, self.cap_stage]
 
-    def shape(self, text: str) -> str:
+    def shape(self, text: str, action: str | None = None) -> str:
+        self._action = action
         for stage in self.stages:
             text = stage(text)
         return text
@@ -58,6 +68,12 @@ class ResponseShaper:
             return text
         if not isinstance(obj, dict):
             return text
+
+        for key in FIELD_DROPS.get(getattr(self, "_action", None) or "", ()):
+            if key in obj:
+                v = obj[key]
+                n = len(v) if isinstance(v, (list, dict, str)) else 1
+                obj[key] = f"<{n} omitted; server-internal, used by diff/similarity endpoints>"
 
         if not self.keep_lint:
             for key in _LINT_KEYS:
