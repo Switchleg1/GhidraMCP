@@ -203,8 +203,8 @@ class Bridge:
             return _dumps({"matches": len(hits), "shown": len(rows), "tools": rows})
 
         @self.mcp.tool()
-        def ghidra_annotate(functions: list[dict] | None = None, labels: list[dict] | None = None,
-                            globals: list[dict] | None = None, save: bool = True,
+        def ghidra_annotate(functions: list[dict] | dict | None = None, labels: list[dict] | dict | None = None,
+                            globals: list[dict] | dict | None = None, save: bool = True,
                             dry_run: bool = False) -> str:
             """
             Apply a whole labelling pass in one call and get one summary back.
@@ -213,7 +213,22 @@ class Bridge:
             globals:   [{address, name?, type?, comment?}]      data: label + data type + plate comment
             save: save the program afterwards. dry_run: validate only.
             """
-            return bridge.annotator.apply(functions, labels, globals, save, dry_run, bridge.program_name)
+            # A single item passed as a dict is accepted; anything else malformed, or a call with
+            # nothing to do, is an error — flat args ({address, name, ...}) are silently dropped
+            # by the MCP layer and once produced a no-op that looked like success.
+            lists = {}
+            for key, val in (("functions", functions), ("labels", labels), ("globals", globals)):
+                if isinstance(val, dict):
+                    val = [val]
+                if val is not None and not (isinstance(val, list) and all(isinstance(x, dict) for x in val)):
+                    return _dumps({"error": f"{key} must be a list of objects", "got": type(val).__name__})
+                lists[key] = val
+            if not any(lists.values()):
+                return _dumps({"error": "nothing to apply: pass functions=[{address, name?, plate?, ...}], "
+                                        "labels=[{address, name}] and/or globals=[{address, ...}]; "
+                                        "top-level address/name/plate are ignored"})
+            return bridge.annotator.apply(lists["functions"], lists["labels"], lists["globals"],
+                                          save, dry_run, bridge.program_name)
 
         @self.mcp.tool()
         def ghidra_explore(address: str, depth: int = 2, max_functions: int = 12,
