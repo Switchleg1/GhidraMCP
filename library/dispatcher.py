@@ -68,6 +68,20 @@ LIST_COERCERS: dict[str, Callable[[list], Any]] = {
     "string": lambda v: ",".join(str(x) for x in v),
 }
 
+# Server defaults that hide data: applied when the caller did not say otherwise.
+DEFAULT_ARGS: dict[str, dict] = {
+    "list_globals": {"include_all_sections": True},   # else only the default section is searched
+}
+# Hard caps on request args whose replies would blow past any response cap anyway.
+ARG_LIMITS: dict[tuple[str, str], tuple[int, str]] = {
+    ("read_memory", "length"): (8192, "read in chunks of <= 8192 bytes, or use search_byte_patterns for scans"),
+}
+# Hints appended to specific empty replies so a silent false negative is at least labelled.
+EMPTY_HINTS: dict[str, tuple[str, str]] = {
+    "search_functions": ("No functions matching",
+                         "[search_functions is a case-insensitive SUBSTRING match, not regex; use ghidra_find(pattern=...) for regex]"),
+}
+
 _NO_FUNCTION = re.compile(r"(?:No function (?:found )?(?:at|for) (?:address:? )?|Function not found:? )(0x[0-9a-fA-F]+|[0-9a-fA-F]{6,})")
 _BADDATA = "halt_baddata()"
 
@@ -108,7 +122,15 @@ class ActionDispatcher:
         missing = [r for r in td.required if r not in args]
         if missing:
             return _error(error=f"missing required args for {td.name}: {missing}",
+                          keys_seen_in_args=sorted(args), note="parameters go inside args={...}",
                           help=f"ghidra_help('{td.name}')")
+        for (action, key), (cap, advice) in ARG_LIMITS.items():
+            if action == td.name and key in args:
+                try:
+                    if int(args[key]) > cap:
+                        return _error(error=f"{key}={args[key]} exceeds {cap} for {td.name}; {advice}")
+                except (TypeError, ValueError):
+                    pass
         if self.require_program:
             absent = [p for p in td.program_selectors if p not in args]
             if absent:
@@ -146,7 +168,7 @@ class ActionDispatcher:
         td = self.catalog.get(name)
         if td is None:
             return _error(error=f"unknown tool '{name}'", did_you_mean=self.catalog.similar(name))
-        args = dict(args or {})
+        args = {**DEFAULT_ARGS.get(name, {}), **(args or {})}
         grep = args.pop("_grep", None)
         err = self._validate(td, args)
         if err:
@@ -154,6 +176,9 @@ class ActionDispatcher:
         query, body = self._prepare(td, args)
         text = self.shaper.shape(self._send(td, query, body), name)
         text = self._hint_containing(text)
+        marker_hint = EMPTY_HINTS.get(name)
+        if marker_hint and text.startswith(marker_hint[0]):
+            text = text.rstrip() + "\n" + marker_hint[1]
         hook = self.post_hooks.get(name)
         if hook:
             text = hook(text, args)

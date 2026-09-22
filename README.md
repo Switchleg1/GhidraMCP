@@ -99,6 +99,11 @@ falls back to the by-name path and counts it as `name_via_byname_path`.
   every memory block — Ghidra emits that pseudo-call for tail calls into an unmapped library
   region, and read literally it produces wrong function names.
 - `create_function` / `delete_function` refresh the function index.
+- `dry_run` (and `grep`, alias of `_grep`) are accepted at the tool level as well as inside `args` (a dropped tool-level
+  `dry_run` once made a "dry run" `create_function` a real write).
+- `list_globals` defaults to `include_all_sections=true` (the server default silently searches only
+  the default memory section); `read_memory` rejects `length > 8192` with chunking advice; an empty
+  `search_functions` reply states that it is a substring match and points at `ghidra_find` for regex.
 
 **Response shaping** (`ResponseShaper`, every call): server lint warnings dropped
 (`--keep-lint` restores), `{"success":true,"data":X}` unwrapped, `{addr: code}` maps emitted as
@@ -170,6 +175,7 @@ Env: `GHIDRA_MCP_URL`, `GHIDRA_MCP_LOG_LEVEL`, `GHIDRA_MCP_REQUIRE_PROGRAM_SELEC
 | which annotate fields are read back and verified | `VERIFY` in `annotator.py` |
 | mnemonics counted as flow transfers / call-graph edge parsing | `_FLOW`, `_EDGE` in `resolver.py` |
 | per-action response post-hooks | `post_hooks` in `dispatcher.py` |
+| server defaults overridden / arg caps / empty-reply hints | `DEFAULT_ARGS`, `ARG_LIMITS`, `EMPTY_HINTS` in `dispatcher.py` |
 | mnemonics treated as flow transfers for unmapped-target notes | `_FLOW` in `resolver.py` |
 | per-endpoint timeouts / scaling | `TIMEOUTS`, `TIMEOUT_SCALING` in `client.py` |
 | retry behaviour per HTTP method | `RETRY` in `client.py` |

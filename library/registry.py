@@ -75,7 +75,17 @@ class ToolRegistry:
         listing = ", ".join(tools)
         dispatcher = self.dispatcher
 
-        def handler(action: str, args: dict | None = None) -> str:
+        def handler(action: str = "", args: dict | None = None, dry_run: bool | None = None,
+                    grep: str | None = None) -> str:
+            if not action:
+                return f'{{"error": "action is required", "actions": "{listing}"}}'
+            args = dict(args or {})
+            # Accept dry_run/_grep at the tool level too; silently dropping them once
+            # turned a "dry run" create_function into a real write.
+            if dry_run is not None:
+                args.setdefault("dry_run", dry_run)
+            if grep is not None:
+                args.setdefault("_grep", grep)
             if action in members:
                 return dispatcher.call(action, args)
             owner = sections.section_of.get(action)
