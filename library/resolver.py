@@ -41,7 +41,10 @@ class AddressResolver:
         self.blocks: list[tuple[int, int, str]] = []
         self.entries: list[int] = []
         self.names: list[str] = []
-        self.indexed_at: float = 0.0
+        self.indexed_at: float = 0.0                    # last full rebuild from list_functions
+        self.updated_at: float = 0.0                    # last time the index was made current
+        self.stale = False                              # an edit could not be applied in place
+        self._dupes: set[str] = set()                   # names listed at >1 address (thunks)
         self._callees: dict[int, int] | None = None     # entry -> callee count (lazy)
         self._callers: dict[int, int] | None = None     # entry -> caller count (lazy)
 
@@ -63,20 +66,36 @@ class AddressResolver:
                        for line in text.splitlines() if (m := _FN_LINE.match(line)))
         self.entries = [a for a, _ in pairs]
         self.names = [n for _, n in pairs]
-        self.indexed_at = time.time()
+        seen: set[str] = set()
+        self._dupes = {n for n in self.names if n in seen or seen.add(n)}
+        self.indexed_at = self.updated_at = time.time()
+        self.stale = False
         self._callees = self._callers = None
 
-    def rename(self, new: str, addr: int | None = None, old: str | None = None) -> None:
-        """Keep the index current after a rename (by address, or by old name)."""
+    def rename(self, new: str, addr: int | None = None, old: str | None = None) -> bool:
+        """Keep the index current after a rename (by address, or by old name).
+
+        Returns True if the edit was applied in place. If the row cannot be located,
+        or the old name is shared by several addresses (a thunk and its implementation
+        report the same name, and Ghidra renames the implementation whichever address
+        was asked), the index is marked stale so the next find() rebuilds it instead of
+        serving a row we are no longer sure about."""
+        i = None
         if addr is not None:
-            i = bisect.bisect_left(self.entries, addr)
-            if i < len(self.entries) and self.entries[i] == addr:
-                self.names[i] = new
+            j = bisect.bisect_left(self.entries, addr)
+            if j < len(self.entries) and self.entries[j] == addr:
+                i = j
         elif old is not None:
-            for i, n in enumerate(self.names):
-                if n == old:
-                    self.names[i] = new
-                    break
+            if old in self._dupes:
+                self.stale = True
+                return False
+            i = next((k for k, n in enumerate(self.names) if n == old), None)
+        if i is None or self.names[i] in self._dupes:
+            self.stale = True
+            return False
+        self.names[i] = new
+        self.updated_at = time.time()
+        return True
 
     def _load_call_counts(self) -> None:
         """One get_full_call_graph (edges) -> callee/caller counts keyed by entry address."""
@@ -141,6 +160,8 @@ class AddressResolver:
     def find(self, pattern: str = "", unnamed: bool = False, region: str = "",
              limit: int = 50, max_callees: int | None = None, min_callers: int | None = None,
              sort: str = "") -> dict:
+        if self.stale:                         # an edit we could not apply in place: rebuild first
+            self.refresh_functions()
         rx = re.compile(pattern, re.I) if pattern else None
         need_counts = max_callees is not None or min_callers is not None or sort in ("callers", "callees")
         if need_counts and self._callees is None:
@@ -173,7 +194,10 @@ class AddressResolver:
         else:
             hits = [f"{n} @ {a:x}" for a, n in rows[:limit]]
         return {"matches": len(rows), "shown": len(hits),
-                "index_as_of": time.strftime("%H:%M:%S", time.localtime(self.indexed_at)),
+                # index_as_of = last moment the index was known current (rename/create/delete
+                # tracking included); index_built = last full rebuild from list_functions.
+                "index_as_of": time.strftime("%H:%M:%S", time.localtime(self.updated_at)),
+                "index_built": time.strftime("%H:%M:%S", time.localtime(self.indexed_at)),
                 "functions": hits}
 
     def unmapped_targets(self, disassembly: str) -> list[tuple[str, str]]:

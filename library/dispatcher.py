@@ -176,6 +176,7 @@ class ActionDispatcher:
         query, body = self._prepare(td, args)
         text = self.shaper.shape(self._send(td, query, body), name)
         text = self._hint_containing(text)
+        text = self._hint_route(text, td, args)
         marker_hint = EMPTY_HINTS.get(name)
         if marker_hint and text.startswith(marker_hint[0]):
             text = text.rstrip() + "\n" + marker_hint[1]
@@ -197,6 +198,18 @@ class ActionDispatcher:
         lines = text.split("\n")
         kept = [l for l in lines if rx.search(l)]
         return "\n".join(kept) + f"\n[_grep {pattern!r}: {len(kept)}/{len(lines)} lines]"
+
+    @staticmethod
+    def _hint_route(text: str, td: ToolDef, args: dict) -> str:
+        """Server says a parameter is missing although we sent it: almost always the verb/param
+        placement, so name the exact route. Same hint a hand-written HTTP client needs."""
+        if len(text) > 400 or "required" not in text or "error" not in text:
+            return text
+        sent = [k for k in args if k in td.params]
+        if not sent:
+            return text
+        return text.rstrip() + f"\n[sent {sent} to {td.http_call()} - a mismatched verb or " \
+                               f"query/body placement reaches the handler with no parameters]"
 
     def _hint_containing(self, text: str) -> str:
         """'No function at 0x...' -> name the function whose body holds that address."""
@@ -253,6 +266,7 @@ class ActionDispatcher:
             return text
         new = args.get("new_name") or args.get("newName") or args.get("function_name")
         if not new:
+            self.resolver.stale = True         # renamed something we cannot locate: rebuild later
             return text
         addr = args.get("function_address")
         try:
@@ -260,8 +274,10 @@ class ActionDispatcher:
                 self.resolver.rename(new, addr=int(str(addr).split(":")[-1].replace("0x", ""), 16))
             elif args.get("oldName"):
                 self.resolver.rename(new, old=args["oldName"])
+            else:
+                self.resolver.stale = True
         except ValueError:
-            pass
+            self.resolver.stale = True
         return text
 
     def _refresh_index(self, text: str, args: dict) -> str:

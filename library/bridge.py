@@ -61,6 +61,7 @@ class Bridge:
         self.dispatcher.resolver = self.resolver
         self.explorer = Explorer(self.dispatcher, self.resolver)
         self.program_name: str | None = None
+        self.static_docs: dict[str, str] = {}
         self._register_static_tools()
 
     def _enable_list_changed(self) -> None:
@@ -173,10 +174,27 @@ class Bridge:
 
         @self.mcp.tool()
         def ghidra_help(tool: str) -> str:
-            """Full description and parameter schema for one action, plus which ghidra_<section> tool runs it."""
+            """
+            Full description and parameter schema for one action, plus which ghidra_<section>
+            tool runs it and how to reach it over plain HTTP (verb, path, query vs JSON body).
+            Bridge-side tools (ghidra_find, ghidra_where, ...) report that they have no HTTP route.
+            """
+            key = next((c for c in (tool, f"ghidra_{tool}") if c in STATIC_TOOLS), None)
+            if key:
+                return json.dumps({
+                    "tool": key,
+                    "section": "bridge (static)",
+                    "transport": "MCP only",
+                    "http": None,
+                    "note": "Computed inside the bridge from its cached indexes. The Ghidra server "
+                            "has no matching route, so scripts talking HTTP directly cannot call it; "
+                            "fetch the underlying endpoint (e.g. /list_functions) and filter locally.",
+                    "description": bridge.static_docs.get(key, ""),
+                }, indent=1, ensure_ascii=False)
             td = bridge.catalog.get(tool)
             if td is None:
-                return _dumps({"error": f"unknown tool '{tool}'", "did_you_mean": bridge.catalog.similar(tool)})
+                return _dumps({"error": f"unknown tool '{tool}'", "did_you_mean": bridge.catalog.similar(tool),
+                               "bridge_side_tools": sorted(STATIC_TOOLS)})
             return json.dumps(td.help(bridge.sections.section_of.get(tool, "?")), indent=1, ensure_ascii=False)
 
         @self.mcp.tool()
@@ -199,8 +217,14 @@ class Bridge:
                                "sections": [f"ghidra_{s}" for s in bridge.sections.members]})
             hits = bridge.catalog.search(terms, pool)
             rows = [f"ghidra_{bridge.sections.section_of[n]} → {n}({bridge.catalog.by_name[n].param_summary()})"
-                    f" — {bridge.catalog.by_name[n].one_liner()}" for n in hits[:40]]
-            return _dumps({"matches": len(hits), "shown": len(rows), "tools": rows})
+                    f" [{bridge.catalog.by_name[n].method}] — {bridge.catalog.by_name[n].one_liner()}"
+                    for n in hits[:40]]
+            static = [] if want else [
+                f"{n}() [bridge-side, no HTTP route] — {bridge.static_docs.get(n, '')[:72]}"
+                for n in sorted(STATIC_TOOLS)
+                if any(t in n.lower() or t in bridge.static_docs.get(n, "").lower() for t in terms)]
+            return _dumps({"matches": len(hits) + len(static), "shown": len(rows) + len(static),
+                           "tools": rows + static})
 
         @self.mcp.tool()
         def ghidra_annotate(functions: list[dict] | dict | None = None, labels: list[dict] | dict | None = None,
@@ -303,6 +327,11 @@ class Bridge:
 
                 asyncio.create_task(follow())
             return result
+
+        bridge.static_docs = {fn.__name__: " ".join((fn.__doc__ or "").split())
+                              for fn in (list_instances, connect_instance, ghidra_help, ghidra_tools,
+                                         ghidra_annotate, ghidra_explore, ghidra_where, ghidra_find,
+                                         import_file)}
 
     # -- run -----------------------------------------------------------------
 

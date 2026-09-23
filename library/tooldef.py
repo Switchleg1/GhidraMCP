@@ -99,11 +99,29 @@ class ToolDef:
             parts.append("…")
         return ", ".join(parts)
 
+    def http_call(self) -> str:
+        """How to reach this endpoint without the MCP layer: verb, path, param placement.
+        Scripts that talk to the Ghidra server directly must match the verb — a POST to a
+        GET endpoint reaches the handler with no parameters and reports them as missing."""
+        names = [n for n in self.params if n != "program"]
+        if not self.is_post:
+            qs = "&".join(f"{n}=<{self.params[n].type}>" for n in names[:4])
+            return f"GET {self.endpoint}" + (f"?{qs}" if qs else "") + "   (query string only; no JSON body)"
+        in_query = [n for n in names if self.params[n].source == "query"]
+        in_body = [n for n in names if self.params[n].source != "query"]
+        parts = [f"POST {self.endpoint}" + ("?" + "&".join(f"{n}=<{self.params[n].type}>" for n in in_query)
+                                            if in_query else "")]
+        parts.append("body={" + ", ".join(f'"{n}": <{self.params[n].type}>' for n in in_body) + "}"
+                     if in_body else "no body params")
+        return "   ".join(parts)
+
     def help(self, section: str) -> dict:
         return {
             "tool": self.name,
             "section": f"ghidra_{section}",
             "method": self.method,
+            "endpoint": self.endpoint,
+            "http": self.http_call(),
             "description": self.description,
             "params": {n: {"type": p.type, "description": p.description,
                            **({"default": p.default} if p.default is not None else {})}

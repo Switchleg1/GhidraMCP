@@ -80,7 +80,15 @@ every write. Plus `ghidra_help(tool)`, `ghidra_tools(query)`, `list_instances`,
   unnamed-only / region search over the function index, plus structural filters from the call
   graph (loaded once on first use, ~1.5 s): `max_callees=0` = leaf functions, `min_callers=N`,
   `sort="callers"`. "Unnamed leaves in flash with ≥10 callers, most-called first" is one call.
-  The index is updated in place on every rename/create/delete and reports `index_as_of`.
+  The index is updated in place on every rename/create/delete; `index_as_of` is the last time it
+  was made current (in-place edits included) and `index_built` the last full rebuild. An edit that
+  cannot be placed with certainty — unknown address, or a name shared by a thunk and its
+  implementation, where Ghidra renames the implementation whichever address was asked — marks the
+  index stale and the next `ghidra_find` rebuilds it instead of serving a row it no longer trusts.
+
+  These bridge-side tools exist only in the MCP layer; the Ghidra server has no matching HTTP route.
+  `ghidra_help('ghidra_find')` says so, and for every real endpoint `ghidra_help` reports its verb,
+  path and query-vs-body placement (`http`) so scripts calling the server directly can match it.
 
 Every write in `ghidra_annotate` that can be read back (function names) is verified after the
 call and counted only if it took — one silent retry on mismatch, then a per-item error. The
@@ -98,7 +106,10 @@ falls back to the by-name path and counts it as `name_via_byname_path`.
 - Decompiles containing `halt_baddata()` get a note naming each jump/call whose target lies outside
   every memory block — Ghidra emits that pseudo-call for tail calls into an unmapped library
   region, and read literally it produces wrong function names.
-- `create_function` / `delete_function` refresh the function index.
+- `create_function` / `delete_function` refresh the function index; renames patch it in place.
+- A "… is required" error for a parameter that was sent gets the endpoint's exact route appended
+  (`GET /decompile_function?address=…`) — a POST to a GET endpoint reaches the handler with no
+  parameters and is reported as a missing parameter, not as a routing error.
 - `dry_run` (and `grep`, alias of `_grep`) are accepted at the tool level as well as inside `args` (a dropped tool-level
   `dry_run` once made a "dry run" `create_function` a real write).
 - `list_globals` defaults to `include_all_sections=true` (the server default silently searches only
