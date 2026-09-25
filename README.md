@@ -70,6 +70,14 @@ every write. Plus `ghidra_help(tool)`, `ghidra_tools(query)`, `list_instances`,
   `g_`-Hungarian name policy rejects every ECU-style name.) Measured on an 8-function +
   7-label pass: 18 calls / 8.9 KB on the wire → 1 call / 4.3 KB, reply 1795 → 53 chars, 17
   fewer model round-trips.
+
+  `program="<name>"` targets one program explicitly: the selector is added to every write and
+  read-back whose endpoint accepts one, a name that is not open is rejected with the open list,
+  and any step whose endpoint has no selector is listed under `program_not_enforced_on`. Without
+  it the pass follows the server's active program, re-read per call (`program_targeting` says
+  which of the two applied) — the reported name is never a connect-time cache. `switch_program` /
+  `open_program` / `close_program` re-read the program state and invalidate the function index,
+  which belongs to the program it was built from.
 - **`ghidra_explore(address, depth=2, max_functions=12, code=True)`** — callers, callee tree to
   `depth`, and decompiled code for the root + callees (BFS, bounded) in one reply. A mid-function
   address resolves to its entry; several comma-separated roots with `code=False` give a bulk
@@ -184,6 +192,7 @@ Env: `GHIDRA_MCP_URL`, `GHIDRA_MCP_LOG_LEVEL`, `GHIDRA_MCP_REQUIRE_PROGRAM_SELEC
 | record-table columns to drop / meta keys to hide | `_DROP_COLUMNS`, `_DROP_META` in `shaper.py` |
 | server-internal bulk fields to elide per action (e.g. `basic_block_hashes`) | `FIELD_DROPS` in `shaper.py` |
 | which annotate fields are read back and verified | `VERIFY` in `annotator.py` |
+| resolving a static tool's endpoint when the name collides | `action_for_path` in `catalog.py` |
 | mnemonics counted as flow transfers / call-graph edge parsing | `_FLOW`, `_EDGE` in `resolver.py` |
 | per-action response post-hooks | `post_hooks` in `dispatcher.py` |
 | server defaults overridden / arg caps / empty-reply hints | `DEFAULT_ARGS`, `ARG_LIMITS`, `EMPTY_HINTS` in `dispatcher.py` |

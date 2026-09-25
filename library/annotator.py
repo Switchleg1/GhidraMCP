@@ -76,13 +76,28 @@ VERIFY: dict[str, tuple[str, Callable[[str], dict], Callable[[str], str | None]]
 class BatchAnnotator:
     def __init__(self, dispatcher: ActionDispatcher):
         self.dispatcher = dispatcher
+        self._program: str | None = None       # per-apply target, injected into every step
+        self._unscoped: set[str] = set()       # endpoints with no program selector to inject into
+
+    def _call(self, endpoint: str, args: dict) -> str:
+        """Add the program selector when the endpoint has one, so every write in a pass
+        (and every read-back) targets the same program instead of whatever the server
+        currently considers active."""
+        if self._program:
+            sel = self.dispatcher.program_selector(endpoint)
+            if sel:
+                if sel not in args:
+                    args = args | {sel: self._program}
+            else:
+                self._unscoped.add(endpoint)   # goes to the server's active program; say so
+        return self.dispatcher.call(endpoint, args)
 
     def _rename_by_name(self, addr: str, new_name: str, extra: dict) -> str | None:
         endpoint, build, extract = VERIFY["name"]
-        current = extract(self.dispatcher.call(endpoint, build(addr)))
+        current = extract(self._call(endpoint, build(addr)))
         if not current:
             return "token-subset rejection and current name unreadable"
-        return _failed(self.dispatcher.call("rename_function", {"oldName": current, "newName": new_name} | extra))
+        return _failed(self._call("rename_function", {"oldName": current, "newName": new_name} | extra))
 
     def _verified(self, field: str, addr: str, value) -> bool | None:
         """True/False if the write can be read back, None if no verifier for this field."""
@@ -90,7 +105,7 @@ class BatchAnnotator:
         if spec is None:
             return None
         endpoint, build, extract = spec
-        return extract(self.dispatcher.call(endpoint, build(addr))) == value
+        return extract(self._call(endpoint, build(addr))) == value
 
     def _run(self, steps, item: dict, addr: str, prefix: str, extra: dict,
              counts: dict, errors: list) -> None:
@@ -101,7 +116,7 @@ class BatchAnnotator:
             key = f"{prefix}{field}"
             err = None
             for attempt in (1, 2):
-                err = _failed(self.dispatcher.call(endpoint, build(addr, value) | extra))
+                err = _failed(self._call(endpoint, build(addr, value) | extra))
                 if err and field == "name" and _TOKEN_SUBSET in err:
                     err = self._rename_by_name(addr, value, extra)
                     if err is None:
@@ -122,10 +137,12 @@ class BatchAnnotator:
 
     def apply(self, functions: list[dict] | None, labels: list[dict] | None,
               globals_: list[dict] | None = None, save: bool = True, dry_run: bool = False,
-              program: str | None = None) -> str:
+              program: str | None = None, explicit_program: bool = False) -> str:
         counts: dict[str, int] = {}
         errors: list[str] = []
         extra = {"dry_run": True} if dry_run else {}
+        self._program = program if explicit_program else None
+        self._unscoped = set()
 
         for item in functions or []:
             addr = item.get("address")
@@ -142,7 +159,7 @@ class BatchAnnotator:
             self._run(GLOBAL_STEPS, item, addr, "global_", extra, counts, errors)
 
         if labels:
-            reply = self.dispatcher.call("batch_create_labels", {"labels": labels} | extra)
+            reply = self._call("batch_create_labels", {"labels": labels} | extra)
             err = _failed(reply)
             if err:
                 errors.append(f"batch_create_labels: {err}")
@@ -156,14 +173,20 @@ class BatchAnnotator:
                     counts["labels"] = len(labels)
 
         if save and not dry_run:
-            err = _failed(self.dispatcher.call("save_program", {}))
+            err = _failed(self._call("save_program", {}))
             counts["saved"] = 0 if err else 1
             if err:
                 errors.append(f"save_program: {err}")
 
+        self._program = None
         out: dict = {"applied": counts}
         if program:
             out["program"] = program
+            out["program_targeting"] = "explicit" if explicit_program else "server's active program"
+            if self._unscoped:
+                out["program_not_enforced_on"] = sorted(self._unscoped)
+                out["warning"] = ("these endpoints take no program selector, so they hit the server's "
+                                  "active program; switch to it before the pass if several are open")
         if dry_run:
             out["dry_run"] = True
         if errors:

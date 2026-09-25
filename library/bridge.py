@@ -55,6 +55,7 @@ class Bridge:
         self.project: str | None = None
         self.dispatcher = ActionDispatcher(self.catalog, lambda: self.client, self.shaper,
                                            self.reconnect, cfg.require_program)
+        self.dispatcher.on_program_change = self._refresh_program_state
         self.registry = ToolRegistry(self.mcp, self.dispatcher, cfg.brief)
         self.annotator = BatchAnnotator(self.dispatcher)
         self.resolver = AddressResolver(self.dispatcher.raw)
@@ -90,12 +91,25 @@ class Bridge:
         self._refresh_program_state()
         return len(self.catalog)
 
+    def current_program(self) -> str | None:
+        """Ask the server which program is active right now. The cached name goes stale the
+        moment anything switches program, so anything that reports a target must re-read it."""
+        info = self.client.get_json("/get_current_program_info") if self.client else None
+        if info and info.get("name"):
+            self.program_name = info["name"]
+        return self.program_name
+
+    def open_programs(self) -> list[str]:
+        data = self.client.get_json("/list_open_programs") if self.client else None
+        rows = (data or {}).get("programs") if isinstance(data, dict) else None
+        return [r.get("name") for r in rows if isinstance(r, dict) and r.get("name")] if rows else []
+
     def _refresh_program_state(self) -> None:
         """Memory-block + function index for ghidra_where/find and error hints; program name for summaries."""
         try:
             self.resolver.refresh()
-            info = self.client.get_json("/get_current_program_info") if self.client else None
-            self.program_name = (info or {}).get("name")
+            self.program_name = None
+            self.current_program()
             log.info(f"indexed {len(self.resolver.entries)} functions, {len(self.resolver.blocks)} blocks "
                      f"in {self.program_name or '?'}")
         except Exception as e:
@@ -181,14 +195,19 @@ class Bridge:
             """
             key = next((c for c in (tool, f"ghidra_{tool}") if c in STATIC_TOOLS), None)
             if key:
+                proxied = bridge.catalog.action_for_path(f"/{key}")          # e.g. import_file
+                td = bridge.catalog.get(proxied) if proxied else None
                 return json.dumps({
                     "tool": key,
                     "section": "bridge (static)",
-                    "transport": "MCP only",
-                    "http": None,
-                    "note": "Computed inside the bridge from its cached indexes. The Ghidra server "
-                            "has no matching route, so scripts talking HTTP directly cannot call it; "
-                            "fetch the underlying endpoint (e.g. /list_functions) and filter locally.",
+                    "transport": "MCP wrapper over an HTTP endpoint" if td else "MCP only",
+                    "http": td.http_call() if td else None,
+                    "note": (f"Wraps {td.method} {td.endpoint} (catalogued as '{proxied}' because this "
+                             "static tool reserves the name); scripts can call that route directly."
+                             if td else
+                             "Computed inside the bridge from its cached indexes. The Ghidra server "
+                             "has no matching route, so scripts talking HTTP directly cannot call it; "
+                             "fetch the underlying endpoint (e.g. /list_functions) and filter locally."),
                     "description": bridge.static_docs.get(key, ""),
                 }, indent=1, ensure_ascii=False)
             td = bridge.catalog.get(tool)
@@ -220,7 +239,9 @@ class Bridge:
                     f" [{bridge.catalog.by_name[n].method}] — {bridge.catalog.by_name[n].one_liner()}"
                     for n in hits[:40]]
             static = [] if want else [
-                f"{n}() [bridge-side, no HTTP route] — {bridge.static_docs.get(n, '')[:72]}"
+                f"{n}() [bridge-side"
+                f"{'' if bridge.catalog.action_for_path(f'/{n}') is None else ', wraps /' + n}"
+                f"] — {bridge.static_docs.get(n, '')[:72]}"
                 for n in sorted(STATIC_TOOLS)
                 if any(t in n.lower() or t in bridge.static_docs.get(n, "").lower() for t in terms)]
             return _dumps({"matches": len(hits) + len(static), "shown": len(rows) + len(static),
@@ -229,13 +250,16 @@ class Bridge:
         @self.mcp.tool()
         def ghidra_annotate(functions: list[dict] | dict | None = None, labels: list[dict] | dict | None = None,
                             globals: list[dict] | dict | None = None, save: bool = True,
-                            dry_run: bool = False) -> str:
+                            dry_run: bool = False, program: str = "") -> str:
             """
             Apply a whole labelling pass in one call and get one summary back.
             functions: [{address, name?, prototype?, variables?{old:new}, plate?, comment?}]
             labels:    [{address, name}]                       plain labels on data/code
             globals:   [{address, name?, type?, comment?}]      data: label + data type + plate comment
             save: save the program afterwards. dry_run: validate only.
+            program: target program by name; every write and read-back carries it. Omit it and
+            the writes go to whatever the server considers active - with several programs open,
+            pass it explicitly. The reply's `program` field is read from the server per call.
             """
             # A single item passed as a dict is accepted; anything else malformed, or a call with
             # nothing to do, is an error — flat args ({address, name, ...}) are silently dropped
@@ -251,8 +275,15 @@ class Bridge:
                 return _dumps({"error": "nothing to apply: pass functions=[{address, name?, plate?, ...}], "
                                         "labels=[{address, name}] and/or globals=[{address, ...}]; "
                                         "top-level address/name/plate are ignored"})
+            target, explicit = program.strip(), bool(program.strip())
+            if explicit:
+                open_names = bridge.open_programs()
+                if open_names and target not in open_names:
+                    return _dumps({"error": f"program '{target}' is not open", "open_programs": open_names})
+            else:
+                target = bridge.current_program()        # live, never the connect-time cache
             return bridge.annotator.apply(lists["functions"], lists["labels"], lists["globals"],
-                                          save, dry_run, bridge.program_name)
+                                          save, dry_run, target, explicit)
 
         @self.mcp.tool()
         def ghidra_explore(address: str, depth: int = 2, max_functions: int = 12,
@@ -306,7 +337,12 @@ class Bridge:
             """
             args = {"file_path": file_path, "project_folder": project_folder, "auto_analyze": auto_analyze,
                     "language": language, "compiler_spec": compiler_spec}
-            result = bridge.dispatcher.call("import_file", args)
+            # This static tool reserves the name "import_file", so the endpoint is catalogued
+            # under another one (import_file_2); resolve it by path, never by name.
+            action = bridge.catalog.action_for_path("/import_file")
+            if action is None:
+                return _dumps({"error": "this Ghidra build has no /import_file endpoint"})
+            result = bridge.dispatcher.call(action, args)
             try:
                 data = json.loads(result)
             except ValueError:

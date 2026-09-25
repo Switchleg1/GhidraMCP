@@ -49,6 +49,13 @@ class ToolCatalog:
     def get(self, name: str) -> ToolDef | None:
         return self.by_name.get(name)
 
+    def action_for_path(self, path: str) -> str | None:
+        """Endpoint path -> the action name it ended up with. A static tool reserves its own
+        name, so /import_file is catalogued as 'import_file_2'; wrappers must resolve the
+        path rather than assume the name."""
+        want = path if path.startswith("/") else f"/{path}"
+        return next((n for n, td in self.by_name.items() if td.endpoint == want), None)
+
     def similar(self, name: str, limit: int = 10) -> list[str]:
         q = name.lower()
         return [n for n in self.by_name if q in n.lower()][:limit]

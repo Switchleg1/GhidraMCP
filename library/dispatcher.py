@@ -100,8 +100,12 @@ class ActionDispatcher:
         self._reconnect = reconnect
         self.require_program = require_program
         self.resolver = None                     # AddressResolver, attached by Bridge
+        self.on_program_change: Callable[[], None] | None = None   # set by Bridge
         # action -> post-processor(text, args) -> text
         self.post_hooks: dict[str, Callable[[str, dict], str]] = {
+            "switch_program": self._program_changed,
+            "open_program": self._program_changed,
+            "close_program": self._program_changed,
             "decompile_function": self._note_baddata,
             "batch_decompile": self._note_baddata,
             "create_function": self._refresh_index,
@@ -278,6 +282,23 @@ class ActionDispatcher:
                 self.resolver.stale = True
         except ValueError:
             self.resolver.stale = True
+        return text
+
+    def program_selector(self, action: str) -> str | None:
+        """Name of the endpoint's program-selector param, if it has one."""
+        td = self.catalog.get(action)
+        sel = td.program_selectors if td else []
+        return sel[0] if sel else None
+
+    def _program_changed(self, text: str, args: dict) -> str:
+        """The active program moved: every cached index belongs to the old one."""
+        if self.resolver is not None:
+            self.resolver.stale = True
+        if self.on_program_change is not None:
+            try:
+                self.on_program_change()
+            except Exception as e:
+                log.warning(f"program-state refresh failed: {e}")
         return text
 
     def _refresh_index(self, text: str, args: dict) -> str:
