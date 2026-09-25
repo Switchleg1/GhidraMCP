@@ -115,7 +115,14 @@ falls back to the by-name path and counts it as `name_via_byname_path`.
   every memory block — Ghidra emits that pseudo-call for tail calls into an unmapped library
   region, and read literally it produces wrong function names.
 - `create_function` / `delete_function` refresh the function index; renames patch it in place.
-- `rename_function` (by name) is **refused when the name is not unique**: that endpoint has no
+- `rename_function` given an address (`address` / `function_address` / `at`) is **rerouted** to
+  `rename_function_by_address` after checking that the function at that entry really holds
+  `oldName` — a mismatch is an error naming the function actually there. The endpoint itself has
+  no address parameter, so otherwise the address is ignored and a stale `oldName` rewrites some
+  other function that reports success. A non-entry address is rejected with the function it falls
+  inside. This only covers calls through the bridge: a direct `POST /rename_function` still
+  resolves by name alone.
+- `rename_function` (by name, no address) is **refused when the name is not unique**: that endpoint has no
   address parameter, so the server resolves `oldName` alone and renames whichever function it
   finds first — a thunk and its implementation share a name. The error lists the addresses and
   points at `rename_function_by_address`. `ghidra_annotate`'s token-subset fallback, which goes

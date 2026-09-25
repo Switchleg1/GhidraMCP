@@ -88,6 +88,10 @@ _BADDATA = "halt_baddata()"
 # so a duplicated name (thunk + implementation, or two functions a naming pass gave the same
 # name) makes the target arbitrary: refuse rather than rename something at random.
 _BY_NAME_RENAMES = {"rename_function"}
+# Address-ish arguments a caller may attach to a by-name rename. The endpoint has no such
+# parameter, so rather than reject or ignore them, they redirect the write to the
+# address-authoritative endpoint after the name at that entry is confirmed.
+_ADDR_KEYS = ("function_address", "address", "at")
 
 
 def _error(**fields) -> str:
@@ -173,6 +177,12 @@ class ActionDispatcher:
     # -- call ----------------------------------------------------------------
 
     def call(self, name: str, args: dict | None) -> str:
+        if name in _BY_NAME_RENAMES:
+            redirected = self._redirect_rename(dict(args or {}))
+            if isinstance(redirected, str):
+                return redirected                      # address/name mismatch: refuse
+            if redirected is not None:
+                name, args = redirected                # address wins: rename by address instead
         td = self.catalog.get(name)
         if td is None:
             return _error(error=f"unknown tool '{name}'", did_you_mean=self.catalog.similar(name))
@@ -297,6 +307,67 @@ class ActionDispatcher:
         except Exception:
             return None
         return hits if len(hits) > 1 else None
+
+    def _name_at_entry(self, address: str) -> tuple[str | None, str | None]:
+        """(name, error) for the function whose ENTRY is this address."""
+        try:
+            addr = int(str(address).split(":")[-1].replace("0x", "").replace("0X", ""), 16)
+        except ValueError:
+            return None, _error(error=f"not a hex address: {address}")
+        if self.resolver is None:
+            return None, None
+        try:
+            fn = self.resolver.containing(addr)
+        except Exception:
+            return None, None
+        if fn is None:
+            return None, _error(error=f"no function at 0x{addr:x}")
+        fn_name, entry, _ = fn
+        if entry != addr:
+            return None, _error(error=f"0x{addr:x} is not a function entry",
+                                inside=f"{fn_name} @ 0x{entry:x}",
+                                use="pass the entry address")
+        return fn_name, None
+
+    def _redirect_rename(self, args: dict) -> tuple[str, dict] | str | None:
+        """A by-name rename given an address: make the ADDRESS authoritative.
+
+        /rename_function has no address parameter - the server resolves oldName alone and
+        renames the first match, so an address passed alongside it is silently ignored and a
+        stale or duplicated oldName rewrites the wrong function. When an address is supplied,
+        check that the function at that entry really holds oldName and then route the write
+        through /rename_function_by_address, which is address-authoritative.
+        """
+        key = next((k for k in _ADDR_KEYS if args.get(k)), None)
+        if key is None:
+            return None
+        target = self.catalog.action_for_path("/rename_function_by_address")
+        if target is None:
+            return _error(error="address given for a by-name rename, but this Ghidra build has no "
+                                "/rename_function_by_address endpoint; omit the address or upgrade")
+        address = args.pop(key)
+        old = args.get("oldName") or args.get("old_name")
+        new = args.get("newName") or args.get("new_name")
+        if not new:
+            return _error(error="rename with an address needs newName", got=sorted(args))
+        current, err = self._name_at_entry(address)
+        if err:
+            return err
+        if old and current and current != old:
+            return _error(
+                error=f"oldName '{old}' does not match the function at {address}",
+                name_at_address=current,
+                note="/rename_function ignores the address and resolves oldName alone, so this "
+                     "would have renamed a different function. Fix oldName, or drop it and let "
+                     "the address decide.",
+                use=f"rename_function_by_address(function_address='{address}', new_name='{new}')")
+        fwd = {"function_address": address, "new_name": new}
+        for carry in ("program", "dry_run"):
+            if args.get(carry) is not None:
+                fwd[carry] = args[carry]
+        if "_grep" in args:
+            fwd["_grep"] = args["_grep"]
+        return target, fwd
 
     def _block_ambiguous_rename(self, action: str, args: dict) -> str | None:
         """Refuse a by-NAME rename of a duplicated name. /rename_function resolves its target
