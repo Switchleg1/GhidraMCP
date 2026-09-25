@@ -84,6 +84,10 @@ EMPTY_HINTS: dict[str, tuple[str, str]] = {
 
 _NO_FUNCTION = re.compile(r"(?:No function (?:found )?(?:at|for) (?:address:? )?|Function not found:? )(0x[0-9a-fA-F]+|[0-9a-fA-F]{6,})")
 _BADDATA = "halt_baddata()"
+# Endpoints that identify the function to rename by NAME. They carry no address parameter,
+# so a duplicated name (thunk + implementation, or two functions a naming pass gave the same
+# name) makes the target arbitrary: refuse rather than rename something at random.
+_BY_NAME_RENAMES = {"rename_function"}
 
 
 def _error(**fields) -> str:
@@ -174,7 +178,7 @@ class ActionDispatcher:
             return _error(error=f"unknown tool '{name}'", did_you_mean=self.catalog.similar(name))
         args = {**DEFAULT_ARGS.get(name, {}), **(args or {})}
         grep = args.pop("_grep", None)
-        err = self._validate(td, args)
+        err = self._validate(td, args) or self._block_ambiguous_rename(name, args)
         if err:
             return err
         query, body = self._prepare(td, args)
@@ -283,6 +287,37 @@ class ActionDispatcher:
         except ValueError:
             self.resolver.stale = True
         return text
+
+    def ambiguous_name(self, name: str) -> list[int] | None:
+        """Entry addresses if this function name is carried by more than one function."""
+        if self.resolver is None or not self.resolver.entries:
+            return None
+        try:
+            hits = self.resolver.addresses_named(name)
+        except Exception:
+            return None
+        return hits if len(hits) > 1 else None
+
+    def _block_ambiguous_rename(self, action: str, args: dict) -> str | None:
+        """Refuse a by-NAME rename of a duplicated name. /rename_function resolves its target
+        by oldName only (it has no address parameter), so with several functions sharing that
+        name the server renames whichever it finds first - silently the wrong one. A thunk and
+        its implementation are the common case."""
+        if action not in _BY_NAME_RENAMES:
+            return None
+        old = args.get("oldName") or args.get("old_name") or args.get("function_name")
+        if not old:
+            return None                      # dry_run is refused too: a plan that cannot be
+                                             # applied safely should fail while it is still a plan
+        hits = self.ambiguous_name(str(old))
+        if not hits:
+            return None
+        return _error(
+            error=f"'{old}' names {len(hits)} functions; a by-name rename would hit an arbitrary one",
+            addresses=[f"0x{a:x}" for a in hits[:12]],
+            use="rename_function_by_address(function_address=<the one you mean>, new_name=...)",
+            note="/rename_function has no address parameter - the server resolves oldName alone. "
+                 "A thunk and its implementation share a name, so pick the address deliberately.")
 
     def program_selector(self, action: str) -> str | None:
         """Name of the endpoint's program-selector param, if it has one."""

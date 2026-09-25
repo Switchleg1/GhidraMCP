@@ -118,6 +118,13 @@ class AddressResolver:
 
     # -- queries -------------------------------------------------------------
 
+    def addresses_named(self, name: str) -> list[int]:
+        """Every entry carrying this name. More than one means a by-name rename is ambiguous:
+        the server resolves it to whichever it finds first, which need not be the one meant."""
+        if self.stale:
+            self.refresh_functions()
+        return [a for a, n in zip(self.entries, self.names) if n == name]
+
     def block(self, addr: int) -> tuple[str, int, int] | None:
         for start, end, name in self.blocks:
             if start <= addr <= end:

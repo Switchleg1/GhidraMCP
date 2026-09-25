@@ -97,6 +97,15 @@ class BatchAnnotator:
         current = extract(self._call(endpoint, build(addr)))
         if not current:
             return "token-subset rejection and current name unreadable"
+        # The fallback path renames by name, and /rename_function has no address parameter:
+        # if the current name is shared (thunk + implementation is the usual case) the server
+        # would rename whichever it finds first, possibly a different address than `addr`.
+        hits = self.dispatcher.ambiguous_name(current)
+        if hits:
+            return (f"token-subset rejection, and the by-name fallback is unsafe: '{current}' is "
+                    f"also at {', '.join(f'0x{a:x}' for a in hits[:6] if f'0x{a:x}' != addr.lower())}"
+                    f" - rename it to a unique name first, or choose a name that is not a token "
+                    f"subset of an existing one")
         return _failed(self._call("rename_function", {"oldName": current, "newName": new_name} | extra))
 
     def _verified(self, field: str, addr: str, value) -> bool | None:

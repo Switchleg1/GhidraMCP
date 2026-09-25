@@ -115,6 +115,11 @@ falls back to the by-name path and counts it as `name_via_byname_path`.
   every memory block — Ghidra emits that pseudo-call for tail calls into an unmapped library
   region, and read literally it produces wrong function names.
 - `create_function` / `delete_function` refresh the function index; renames patch it in place.
+- `rename_function` (by name) is **refused when the name is not unique**: that endpoint has no
+  address parameter, so the server resolves `oldName` alone and renames whichever function it
+  finds first — a thunk and its implementation share a name. The error lists the addresses and
+  points at `rename_function_by_address`. `ghidra_annotate`'s token-subset fallback, which goes
+  through the same by-name path, refuses for the same reason instead of writing blind.
 - A "… is required" error for a parameter that was sent gets the endpoint's exact route appended
   (`GET /decompile_function?address=…`) — a POST to a GET endpoint reaches the handler with no
   parameters and is reported as a missing parameter, not as a routing error.
@@ -193,6 +198,7 @@ Env: `GHIDRA_MCP_URL`, `GHIDRA_MCP_LOG_LEVEL`, `GHIDRA_MCP_REQUIRE_PROGRAM_SELEC
 | server-internal bulk fields to elide per action (e.g. `basic_block_hashes`) | `FIELD_DROPS` in `shaper.py` |
 | which annotate fields are read back and verified | `VERIFY` in `annotator.py` |
 | resolving a static tool's endpoint when the name collides | `action_for_path` in `catalog.py` |
+| endpoints that rename by name and so need the uniqueness guard | `_BY_NAME_RENAMES` in `dispatcher.py` |
 | mnemonics counted as flow transfers / call-graph edge parsing | `_FLOW`, `_EDGE` in `resolver.py` |
 | per-action response post-hooks | `post_hooks` in `dispatcher.py` |
 | server defaults overridden / arg caps / empty-reply hints | `DEFAULT_ARGS`, `ARG_LIMITS`, `EMPTY_HINTS` in `dispatcher.py` |
