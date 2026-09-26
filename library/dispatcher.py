@@ -84,6 +84,15 @@ EMPTY_HINTS: dict[str, tuple[str, str]] = {
 
 _NO_FUNCTION = re.compile(r"(?:No function (?:found )?(?:at|for) (?:address:? )?|Function not found:? )(0x[0-9a-fA-F]+|[0-9a-fA-F]{6,})")
 _BADDATA = "halt_baddata()"
+# An instruction/listing line: leading address followed by ':' (plain form) or ' |' (table form).
+_INSN_ADDR = re.compile(r"^\s*(?:0x)?([0-9a-fA-F]{4,})\s*(?::|\|)", re.M)
+# Largest gap (bytes) between the last listed instruction and the function's body end that is
+# still explainable by one trailing instruction. Beyond it the listing stopped short.
+_DISASM_GAP_TOLERANCE = 8
+# GET list endpoints whose `limit` is a hard cut with no server-side truncation marker: a page
+# whose length equals the requested limit is almost certainly cut short (paginate with offset).
+_LIMIT_CAPPED = {"get_xrefs_to", "get_xrefs_from", "get_function_callers", "get_function_callees",
+                 "get_bulk_xrefs", "list_references"}
 # Endpoints that identify the function to rename by NAME. They carry no address parameter,
 # so a duplicated name (thunk + implementation, or two functions a naming pass gave the same
 # name) makes the target arbitrary: refuse rather than rename something at random.
@@ -116,6 +125,7 @@ class ActionDispatcher:
             "close_program": self._program_changed,
             "decompile_function": self._note_baddata,
             "batch_decompile": self._note_baddata,
+            "disassemble_function": self._check_disasm_truncation,
             "create_function": self._refresh_index,
             "delete_function": self._refresh_index,
             "rename_function_by_address": self._track_rename,
@@ -201,6 +211,8 @@ class ActionDispatcher:
         hook = self.post_hooks.get(name)
         if hook:
             text = hook(text, args)
+        if name in _LIMIT_CAPPED:
+            text = self._warn_limit_reached(text, args)
         if grep:
             text = self._grep(text, grep)
         return text
@@ -261,6 +273,52 @@ class ActionDispatcher:
         if notes:
             note += "\n//   " + "\n//   ".join(notes)
         return text + note
+
+    def _check_disasm_truncation(self, text: str, args: dict) -> str:
+        """disassemble_function has no offset/limit lever, and a very large body can stop short
+        (server-side, no marker). Compare the last listed instruction to the function's body
+        end and flag the gap so a count taken off the listing is not silently low."""
+        if self.resolver is None or text.startswith("{\"error\"") or "address" not in args:
+            return text
+        addrs = _INSN_ADDR.findall(text)
+        if not addrs:
+            return text
+        try:
+            last = int(addrs[-1], 16)
+            entry = int(str(args["address"]).split(":")[-1].replace("0x", "").replace("0X", ""), 16)
+        except ValueError:
+            return text
+        fn = self.resolver.containing(entry)
+        if not fn:
+            return text
+        name, fn_entry, body_end = fn
+        if body_end - last <= _DISASM_GAP_TOLERANCE:
+            return text
+        return text.rstrip() + (
+            f"\n[TRUNCATED: listing stops at 0x{last:x} but {name} body runs to 0x{body_end:x} "
+            f"(0x{body_end - last:x} bytes not shown). disassemble_function has no offset/limit, so "
+            f"counts off this listing under-report; cross-check with decompile_function.]")
+
+    def _warn_limit_reached(self, text: str, args: dict) -> str:
+        """A line-per-record GET whose page length equals the requested limit is a hard cut with
+        no marker: warn so it is not read as the full set. Only fires when the caller set limit."""
+        if "limit" not in args or text.startswith("{\"error\""):
+            return text
+        try:
+            limit = int(args["limit"])
+        except (TypeError, ValueError):
+            return text
+        rows = [l for l in text.split("\n") if l.strip() and not l.startswith("[")]
+        if len(rows) < limit:
+            return text
+        nxt = 0
+        try:
+            nxt = int(args.get("offset", 0)) + limit
+        except (TypeError, ValueError):
+            pass
+        return text.rstrip() + (
+            f"\n[LIMIT {limit} reached: this is a hard cut with no marker; there may be more. "
+            f"Paginate with offset={nxt} (do not trust a page whose length equals the limit).]")
 
     @staticmethod
     def _decompiled_addresses(text: str, args: dict) -> list[str]:
