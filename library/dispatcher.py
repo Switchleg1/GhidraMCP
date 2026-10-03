@@ -58,6 +58,40 @@ def _to_json(v):
     return v
 
 
+def _comment_entries(value):
+    """Anything a model plausibly means by a comment list -> [{address, comment}].
+
+    The endpoint declares `decompiler_comments`/`disassembly_comments` as arrays of
+    {address, comment}, but models reach for a map ({addr: text}), a single object,
+    or a JSON string. The server rejects all three. Normalise rather than fail;
+    anything unrecognised is passed through untouched so the server's own error wins.
+    """
+    if isinstance(value, str):
+        s = value.strip()
+        if not s:
+            return []
+        try:
+            return _comment_entries(json.loads(s))
+        except ValueError:
+            return value
+    def pair(address, comment):
+        if isinstance(comment, dict):
+            comment = comment.get("comment")
+        return None if address is None or comment is None else {
+            "address": str(address), "comment": str(comment)}
+
+    if isinstance(value, dict):
+        if "address" in value:                      # a single entry passed bare
+            one = pair(value.get("address"), value.get("comment"))
+            return [one] if one else []
+        return [e for e in (pair(a, c) for a, c in value.items()) if e]   # {addr: text} map
+    if isinstance(value, list):
+        out = [pair(v.get("address"), v.get("comment")) if isinstance(v, dict) else None
+               for v in value]
+        return [e for e in out if e] if all(isinstance(v, dict) for v in value) else value
+    return value
+
+
 # declared schema type -> coercer for values arriving as strings
 COERCERS: dict[str, Callable[[Any], Any]] = {
     "integer": _to_int, "number": _to_float, "boolean": _to_bool,
@@ -66,6 +100,15 @@ COERCERS: dict[str, Callable[[Any], Any]] = {
 # declared type -> coercer for values arriving as lists (models often pass ["a","b"] for "a,b")
 LIST_COERCERS: dict[str, Callable[[list], Any]] = {
     "string": lambda v: ",".join(str(x) for x in v),
+}
+
+# action -> payload normaliser applied after coercion, before the request is built.
+PAYLOAD_NORMALIZERS: dict[str, Callable[[dict], dict]] = {
+    "batch_set_comments": lambda d: {
+        **d,
+        **{k: _comment_entries(d[k])
+           for k in ("decompiler_comments", "disassembly_comments") if k in d},
+    },
 }
 
 # Server defaults that hide data: applied when the caller did not say otherwise.
@@ -164,6 +207,9 @@ class ActionDispatcher:
         """-> (query_params, json_body|None) with coercion + address normalising applied."""
         query: dict = {}
         body: dict = {}
+        normalise = PAYLOAD_NORMALIZERS.get(td.name)
+        if normalise:
+            args = normalise(args)
         for k, v in args.items():
             if v is None or v == "":
                 continue                     # empty = omitted (server treats "" as present-but-empty)

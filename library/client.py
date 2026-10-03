@@ -1,8 +1,14 @@
-"""GhidraClient — keep-alive HTTP to the GhidraMCP plugin.
+"""GhidraClient — keep-alive HTTP to the GhidraMCP plugin, over TCP or UDS.
 
 One persistent connection, reopened on failure; all calls serialised through
 a lock (concurrent MCP calls otherwise interleave on the plugin side).
 Timeouts and retry policy are tables.
+
+The base URL selects the transport:
+    http://127.0.0.1:8089        TCP loopback (refused for any non-local host)
+    unix:/run/.../ghidra-42.sock Unix domain socket (preferred for local instances)
+Both end up as an http.client connection object, so everything below the
+constructor is transport-agnostic.
 """
 
 from __future__ import annotations
@@ -14,6 +20,8 @@ import threading
 import time
 from dataclasses import dataclass
 from urllib.parse import urlencode, urlparse
+
+from .uds import UnixHTTPConnection, is_uds_url, path_from_url, uds_supported
 
 log = logging.getLogger("ghidra-mcp")
 
@@ -74,11 +82,20 @@ def timeout_for(endpoint: str, payload: dict | None = None) -> int:
 
 class GhidraClient:
     def __init__(self, base_url: str):
-        u = urlparse(base_url)
-        if (u.hostname or "").lower() not in {"127.0.0.1", "localhost", "::1"}:
-            raise ValueError(f"Refusing non-local Ghidra URL: {base_url}")
         self.base_url = base_url
-        self.host, self.port = u.hostname, u.port or 80
+        self.socket_path: str | None = None
+        if is_uds_url(base_url):
+            if not uds_supported():
+                raise ValueError("AF_UNIX is unavailable on this host; use a TCP URL")
+            self.socket_path = path_from_url(base_url)
+            self.transport = "uds"
+            self.host, self.port = "localhost", None
+        else:
+            u = urlparse(base_url)
+            if (u.hostname or "").lower() not in {"127.0.0.1", "localhost", "::1"}:
+                raise ValueError(f"Refusing non-local Ghidra URL: {base_url}")
+            self.transport = "tcp"
+            self.host, self.port = u.hostname, u.port or 80
         self._conn: http.client.HTTPConnection | None = None
         self._last_used = 0.0
         self._lock = threading.Lock()
@@ -89,7 +106,9 @@ class GhidraClient:
         if self._conn is not None and time.monotonic() - self._last_used > KEEPALIVE_IDLE_MAX:
             self.close()              # idle keep-alive: the server may have dropped it; don't race it
         if self._conn is None:
-            self._conn = http.client.HTTPConnection(self.host, self.port, timeout=timeout)
+            self._conn = (UnixHTTPConnection(self.socket_path, timeout=timeout)
+                          if self.transport == "uds" else
+                          http.client.HTTPConnection(self.host, self.port, timeout=timeout))
         else:
             self._conn.timeout = timeout
             if self._conn.sock:

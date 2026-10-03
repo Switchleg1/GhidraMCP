@@ -25,6 +25,10 @@ SECTIONS: dict[str, dict] = {
             "list_project_files", "create_folder", "delete_file",
             "list_scripts", "run_ghidra_script", "run_script_inline",
             "prompt_policy", "convert_number",
+            # program options + property maps (plugin >= the 222-endpoint build)
+            "get_program_options", "set_program_option", "remove_program_option", "list_option_groups",
+            "list_property_maps", "create_property_map", "delete_property_map",
+            "list_properties", "get_property", "set_property", "remove_property",
         ],
     },
     "functions": {
@@ -37,7 +41,8 @@ SECTIONS: dict[str, dict] = {
             "create_function", "delete_function", "find_next_undefined_function", "find_code_gaps",
             "rename_function", "rename_function_by_address", "batch_rename_function_components",
             "set_function_prototype", "validate_function_prototype", "set_function_no_return",
-            "clear_instruction_flow_override",
+            "clear_instruction_flow_override", "clear_flow_and_repair",
+            "set_function_this_type", "set_decompiler_variable_type", "list_class_members",
         ],
     },
     "variables": {
@@ -53,6 +58,7 @@ SECTIONS: dict[str, dict] = {
             "get_xrefs_to", "get_xrefs_from", "get_function_xrefs", "get_bulk_xrefs",
             "get_function_callers", "get_function_callees", "get_function_call_graph", "get_full_call_graph",
             "analyze_call_graph", "analyze_control_flow", "find_dead_code", "search_instructions",
+            "add_memory_reference", "remove_reference",
         ],
     },
     "memory": {
@@ -79,6 +85,7 @@ SECTIONS: dict[str, dict] = {
         "description": "Decompiler / disassembly / plate comments.",
         "tools": [
             "set_decompiler_comment", "set_disassembly_comment", "set_plate_comment", "get_plate_comment",
+            "get_comment", "set_comment",
             "batch_set_comments", "clear_function_comments",
         ],
     },
@@ -90,6 +97,7 @@ SECTIONS: dict[str, dict] = {
             "create_struct", "create_union", "create_enum", "get_enum_values", "create_typedef",
             "create_pointer_type", "create_array_type", "create_function_signature", "clone_data_type",
             "delete_data_type", "import_data_types", "list_calling_conventions",
+            "rename_data_type", "resolve_duplicate_type", "analyze_global_completeness",
         ],
     },
     "structs": {
@@ -97,6 +105,7 @@ SECTIONS: dict[str, dict] = {
         "tools": [
             "get_struct_layout", "add_struct_field", "modify_struct_field", "remove_struct_field",
             "analyze_struct_field_usage", "get_field_access_context", "suggest_field_names",
+            "modify_struct_field_type", "embed_struct_field", "resize_struct", "recreate_struct",
         ],
     },
     "tags": {
